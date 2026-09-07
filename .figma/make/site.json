@@ -1,0 +1,10 @@
+{
+  "description": "Map and manage underground sewer systems by adding assets, drawing pipes with detailed attributes, and analyzing sewer camera videos with observations.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
