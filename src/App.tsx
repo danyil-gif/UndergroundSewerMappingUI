@@ -60,6 +60,11 @@ interface Asset {
   // Gutter hub
   cameraAccessible?: boolean
   videos?: CamVideo[]
+  archived?: boolean
+  archivedById?: string
+  archivedOn?: number
+  archivedDuringVisitId?: string
+  archiveReason?: string
 }
 
 interface RoutePoint {
@@ -97,6 +102,11 @@ interface Pipe {
   end?: PipeEndpoint
   transitions?: PipeTransition[]
   videos: CamVideo[]
+  archived?: boolean
+  archivedById?: string
+  archivedOn?: number
+  archivedDuringVisitId?: string
+  archiveReason?: string
 }
 
 interface CharRow {
@@ -251,6 +261,15 @@ const LOGISTICS_CATEGORIES = [
 
 const CONTACT_ROLES = ["Property manager", "On-site maintenance", "Board president", "Board member", "After-hours", "Other"]
 const CONTACT_METHODS = ["Call", "Text", "Email"]
+
+const ARCHIVE_REASONS = [
+  "Duplicate — already recorded elsewhere",
+  "Doesn't exist — recorded in error",
+  "Removed from the property",
+  "Replaced by another asset",
+  "Wrong asset type — re-recorded correctly",
+  "Other",
+]
 
 // ── Seed closed visits ────────────────────────────────────────────────────────
 
@@ -1155,7 +1174,7 @@ export default function App() {
   const [hoverPipeId, setHoverPipeId] = useState<string | null>(null)
   const [leftPanelOpen, setLeftPanelOpen] = useState(true)
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
-  const [leftSectionOpen, setLeftSectionOpen] = useState({ infra: true, assets: true, pipes: true, visits: false })
+  const [leftSectionOpen, setLeftSectionOpen] = useState({ infra: true, assets: true, pipes: true, visits: false, archived: false })
   // ── Visit / session state ───────────────────────────────────────────────────
   const [appView, setAppView] = useState<"launch" | "simd">("launch")
   const [browseMode, setBrowseMode] = useState(false)
@@ -1214,6 +1233,15 @@ export default function App() {
   const [editingViewId, setEditingViewId] = useState<string | null>(null)
   const [editViewName, setEditViewName] = useState("")
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null)
+  // ── Archive / undo toast ──────────────────────────────────────────────────
+  const [undoToast, setUndoToast] = useState<{ label: string; onUndo: () => void; timer: ReturnType<typeof setTimeout> } | null>(null)
+  const [archiveDialog, setArchiveDialog] = useState<{
+    type: "asset" | "pipe"
+    id: string
+    tier: "delete" | "archive"
+    archiveReason: string
+    alsoArchivePipes: boolean
+  } | null>(null)
   const [activeTabId, setActiveTabId] = useState<"main" | string>("main")
   const [pipePanelW, setPipePanelW] = useState(840)
   const pipeDragRef = useRef<{ startX: number; startW: number } | null>(null)
@@ -1800,35 +1828,164 @@ export default function App() {
     setEditingPipe(false); setMode("view"); setRightPanelOpen(true)
   }
 
-  // ── Confirm-gated deletions ──────────────────────────────────────────────────
+  // ── Archive / delete helpers ────────────────────────────────────────────────
 
-  const deleteAsset = (id: string) => {
+  function computeAssetTier(id: string): "delete" | "archive" {
     const a = assets.find(x => x.id === id)
-    const linked = pipes.filter(p => p.fromId === id || p.toId === id)
-    setConfirmDialog({
-      title: "Delete Asset",
-      message: `Delete ${a?.label}?${linked.length ? ` This will also remove ${linked.length} connected pipe${linked.length > 1 ? "s" : ""}.` : ""}`,
-      onConfirm: () => {
-        const linkedIds = linked.map(p => p.id)
-        setPipes(prev => prev.filter(p => !linkedIds.includes(p.id)))
-        setAssets(prev => prev.filter(x => x.id !== id))
-        if (selectedAssetId === id) setSelectedAssetId(null)
-        if (selectedPipeId && linkedIds.includes(selectedPipeId)) { setSelectedPipeId(null); setSelectedVideoId(null) }
-      },
-    })
+    if (!a) return "delete"
+    const connectedPipes = pipes.filter(p => p.fromId === id || p.toId === id)
+    const hasObs = (a.conditionRating !== undefined) || ((a.videos ?? []).length > 0)
+    const isCurrentVisit = currentVisitId !== null
+    const hasHistory = hasObs || connectedPipes.length > 0
+    if (!hasHistory && isCurrentVisit) return "delete"
+    if (hasHistory) return "archive"
+    return "delete"
   }
 
-  const deletePipe = (id: string) => {
-    const p = pipes.find(x => x.id === id)
-    setConfirmDialog({
-      title: "Delete Pipe",
-      message: `Delete ${p?.label}? All associated camera inspections and observations will be permanently removed.`,
-      onConfirm: () => {
-        setPipes(prev => prev.filter(x => x.id !== id))
-        if (selectedPipeId === id) { setSelectedPipeId(null); setSelectedVideoId(null) }
-      },
-    })
+  function showArchiveAsset(id: string) {
+    const tier = computeAssetTier(id)
+    setArchiveDialog({ type: "asset", id, tier, archiveReason: "", alsoArchivePipes: false })
   }
+
+  function showArchivePipe(id: string) {
+    const p = pipes.find(x => x.id === id)
+    const hasHistory = (p?.videos.length ?? 0) > 0
+    const tier: "delete" | "archive" = hasHistory ? "archive" : "delete"
+    setArchiveDialog({ type: "pipe", id, tier, archiveReason: "", alsoArchivePipes: false })
+  }
+
+  function commitArchiveAsset(id: string, reason: string, alsoArchivePipes: boolean) {
+    const a = assets.find(x => x.id === id)
+    if (!a) return
+    const connectedPipes = pipes.filter(p => p.fromId === id || p.toId === id)
+    const now = Date.now()
+    const who = selectedPersonId ?? "unknown"
+
+    setAssets(prev => prev.map(x => x.id === id
+      ? { ...x, archived: true, archivedById: who, archivedOn: now, archivedDuringVisitId: currentVisitId ?? undefined, archiveReason: reason }
+      : x
+    ))
+
+    if (alsoArchivePipes && connectedPipes.length > 0) {
+      setPipes(prev => prev.map(p => connectedPipes.some(cp => cp.id === p.id)
+        ? { ...p, archived: true, archivedById: who, archivedOn: now, archivedDuringVisitId: currentVisitId ?? undefined, archiveReason: reason }
+        : p
+      ))
+    }
+
+    if (selectedAssetId === id) setSelectedAssetId(null)
+
+    const logText = alsoArchivePipes && connectedPipes.length > 0
+      ? `${a.label} archived with ${connectedPipes.length} connected pipe${connectedPipes.length > 1 ? "s" : ""} — ${reason.split(" —")[0].toLowerCase()}`
+      : `${a.label} archived — ${reason.split(" —")[0].toLowerCase()}`
+    appendLog(logText)
+
+    const prevAssets = assets
+    const prevPipes = pipes
+    showUndoToast(`${a.label} archived`, () => {
+      setAssets(prevAssets)
+      if (alsoArchivePipes) setPipes(prevPipes)
+      appendLog(`${a.label} archive undone`)
+    })
+    setArchiveDialog(null)
+  }
+
+  function commitDeleteAsset(id: string) {
+    const a = assets.find(x => x.id === id)
+    if (!a) return
+    const linked = pipes.filter(p => p.fromId === id || p.toId === id)
+    const linkedIds = linked.map(p => p.id)
+    setPipes(prev => prev.filter(p => !linkedIds.includes(p.id)))
+    setAssets(prev => prev.filter(x => x.id !== id))
+    if (selectedAssetId === id) setSelectedAssetId(null)
+    if (selectedPipeId && linkedIds.includes(selectedPipeId)) { setSelectedPipeId(null); setSelectedVideoId(null) }
+    appendLog(`${a.label} deleted — created and removed in this visit`)
+
+    const prevAssets = assets
+    const prevPipes = pipes
+    showUndoToast(`${a.label} deleted`, () => {
+      setAssets(prevAssets)
+      setPipes(prevPipes)
+    })
+    setArchiveDialog(null)
+  }
+
+  function commitArchivePipe(id: string, reason: string) {
+    const p = pipes.find(x => x.id === id)
+    if (!p) return
+    const now = Date.now()
+    const who = selectedPersonId ?? "unknown"
+    setPipes(prev => prev.map(x => x.id === id
+      ? { ...x, archived: true, archivedById: who, archivedOn: now, archivedDuringVisitId: currentVisitId ?? undefined, archiveReason: reason }
+      : x
+    ))
+    if (selectedPipeId === id) { setSelectedPipeId(null); setSelectedVideoId(null) }
+    appendLog(`${p.label} archived — ${reason.split(" —")[0].toLowerCase()}`)
+
+    const prevPipes = pipes
+    showUndoToast(`${p.label} archived`, () => {
+      setPipes(prevPipes)
+      appendLog(`${p.label} archive undone`)
+    })
+    setArchiveDialog(null)
+  }
+
+  function commitDeletePipe(id: string) {
+    const p = pipes.find(x => x.id === id)
+    if (!p) return
+    setPipes(prev => prev.filter(x => x.id !== id))
+    if (selectedPipeId === id) { setSelectedPipeId(null); setSelectedVideoId(null) }
+    appendLog(`${p.label} deleted — created and removed in this visit`)
+
+    const prevPipes = pipes
+    showUndoToast(`${p.label} deleted`, () => {
+      setPipes(prevPipes)
+    })
+    setArchiveDialog(null)
+  }
+
+  function restoreAsset(id: string) {
+    const a = assets.find(x => x.id === id)
+    if (!a) return
+    setAssets(prev => prev.map(x => x.id === id
+      ? { ...x, archived: false, archivedById: undefined, archivedOn: undefined, archivedDuringVisitId: undefined, archiveReason: undefined }
+      : x
+    ))
+    appendLog(`${a.label} restored from archive`)
+    const connectedArchived = pipes.filter(p => (p.fromId === id || p.toId === id) && p.archived)
+    if (connectedArchived.length > 0) {
+      const names = connectedArchived.map(p => p.label).join(", ")
+      setConfirmDialog({
+        title: "Restore connected pipes?",
+        message: `${names} connect${connectedArchived.length === 1 ? "s" : ""} to this asset and ${connectedArchived.length === 1 ? "is" : "are"} also archived. Restore ${connectedArchived.length === 1 ? "it" : "them"} too?`,
+        onConfirm: () => {
+          setPipes(prev => prev.map(p => connectedArchived.some(cp => cp.id === p.id)
+            ? { ...p, archived: false, archivedById: undefined, archivedOn: undefined, archivedDuringVisitId: undefined, archiveReason: undefined }
+            : p
+          ))
+        },
+      })
+    }
+  }
+
+  function restorePipe(id: string) {
+    const p = pipes.find(x => x.id === id)
+    if (!p) return
+    setPipes(prev => prev.map(x => x.id === id
+      ? { ...x, archived: false, archivedById: undefined, archivedOn: undefined, archivedDuringVisitId: undefined, archiveReason: undefined }
+      : x
+    ))
+    appendLog(`${p.label} restored from archive`)
+  }
+
+  function showUndoToast(label: string, onUndo: () => void) {
+    if (undoToast) clearTimeout(undoToast.timer)
+    const timer = setTimeout(() => setUndoToast(null), 12000)
+    setUndoToast({ label, onUndo, timer })
+  }
+
+  const deleteAsset = showArchiveAsset
+  const deletePipe = showArchivePipe
 
   const deleteVideo = (pipeId: string, videoId: string) => {
     const vid = pipes.find(p => p.id === pipeId)?.videos.find(v => v.id === videoId)
@@ -2574,10 +2731,10 @@ export default function App() {
           {leftSectionOpen.assets && (
             <div style={{ overflowY: "auto", flex: 1, touchAction: "pan-y" }}>
               {/* Assets */}
-              {assets.length > 0 && (
+              {assets.filter(a => !a.archived).length > 0 && (
                 <div style={{ padding: "4px 16px 2px", fontSize: 8.5, fontWeight: 700, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase" }}>Assets</div>
               )}
-              {assets.map(asset => {
+              {assets.filter(a => !a.archived).map(asset => {
                 const cnt = pipes.filter(p => p.fromId === asset.id || p.toId === asset.id).length
                 const sel = selectedAssetId === asset.id
                 return (
@@ -2603,10 +2760,10 @@ export default function App() {
                 )
               })}
               {/* Pipes */}
-              {pipes.length > 0 && (
-                <div style={{ padding: "8px 16px 2px", fontSize: 8.5, fontWeight: 700, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase", borderTop: assets.length > 0 ? `1px solid ${C.border}` : undefined, marginTop: assets.length > 0 ? 4 : 0 }}>Pipes</div>
+              {pipes.filter(p => !p.archived).length > 0 && (
+                <div style={{ padding: "8px 16px 2px", fontSize: 8.5, fontWeight: 700, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase", borderTop: assets.filter(a => !a.archived).length > 0 ? `1px solid ${C.border}` : undefined, marginTop: assets.filter(a => !a.archived).length > 0 ? 4 : 0 }}>Pipes</div>
               )}
-              {pipes.map(pipe => {
+              {pipes.filter(p => !p.archived).map(pipe => {
                 const sel = selectedPipeId === pipe.id
                 const fr = assets.find(a => a.id === pipe.fromId)
                 const to = assets.find(a => a.id === pipe.toId)
@@ -2642,6 +2799,9 @@ export default function App() {
                     )}
                     {needsAttention && !analysisComplete && (
                       <div title="Needs attention" style={{ flexShrink: 0, width: 16, height: 16, borderRadius: "50%", background: "#A96B00", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff", fontFamily: "JetBrains Mono" }}>!</div>
+                    )}
+                    {(assets.find(a => a.id === pipe.fromId)?.archived || (pipe.toId && assets.find(a => a.id === pipe.toId)?.archived)) && (
+                      <div title="Connects to an archived asset" style={{ flexShrink: 0, fontSize: 9, color: "#D97706", fontWeight: 700 }}>⚠</div>
                     )}
                   </div>
                 )
@@ -2693,6 +2853,69 @@ export default function App() {
           )}
         </div>
 
+        {/* ── ARCHIVED section ── */}
+        {(assets.some(a => a.archived) || pipes.some(p => p.archived)) && (
+          <div style={{ borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <button
+              onClick={() => setLeftSectionOpen(s => ({ ...s, archived: !s.archived }))}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 16px", background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", cursor: "pointer", flexShrink: 0 }}
+            >
+              <span style={{ fontSize: 9, fontWeight: 700, color: "#D97706", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                Archived · {assets.filter(a => a.archived).length + pipes.filter(p => p.archived).length}
+              </span>
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" style={{ transform: leftSectionOpen.archived ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.15s" }}>
+                <path d="M2 4l4 4 4-4" stroke="#D97706" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            {leftSectionOpen.archived && (
+              <div style={{ overflowY: "auto", maxHeight: 240 }}>
+                {assets.filter(a => a.archived).map(a => {
+                  const who = SITE_PERSONS.find(p => p.id === a.archivedById)
+                  const d = a.archivedOn ? new Date(a.archivedOn).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""
+                  return (
+                    <div key={a.id}
+                      style={{ padding: "7px 16px", display: "flex", alignItems: "center", gap: 8, transition: "background 0.1s", cursor: "pointer" }}
+                      onClick={() => selectAsset(a.id)}
+                      onMouseEnter={e => (e.currentTarget.style.background = C.card)}
+                      onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.label} <span style={{ fontWeight: 400, color: C.dim }}>· {a.type}</span></div>
+                        <div style={{ fontSize: 9.5, color: C.dim }}>{a.archiveReason?.split(" —")[0] ?? ""}{who ? ` · ${who.name}` : ""}{d ? ` · ${d}` : ""}</div>
+                      </div>
+                      <button onClick={e => { e.stopPropagation(); restoreAsset(a.id) }}
+                        style={{ flexShrink: 0, padding: "3px 8px", fontSize: 9, fontWeight: 700, background: C.card, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", color: C.muted }}>
+                        Restore
+                      </button>
+                    </div>
+                  )
+                })}
+                {pipes.filter(p => p.archived).map(p => {
+                  const fr = assets.find(a => a.id === p.fromId)
+                  const to = p.toId ? assets.find(a => a.id === p.toId) : null
+                  const who = SITE_PERSONS.find(x => x.id === p.archivedById)
+                  const d = p.archivedOn ? new Date(p.archivedOn).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""
+                  return (
+                    <div key={p.id}
+                      style={{ padding: "7px 16px", display: "flex", alignItems: "center", gap: 8, transition: "background 0.1s", cursor: "pointer" }}
+                      onClick={() => selectPipe(p.id)}
+                      onMouseEnter={e => (e.currentTarget.style.background = C.card)}
+                      onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label} <span style={{ fontWeight: 400, color: C.dim }}>· {fr?.label ?? "?"} → {to?.label ?? "free"}</span></div>
+                        <div style={{ fontSize: 9.5, color: C.dim }}>{p.archiveReason?.split(" —")[0] ?? ""}{who ? ` · ${who.name}` : ""}{d ? ` · ${d}` : ""}</div>
+                      </div>
+                      <button onClick={e => { e.stopPropagation(); restorePipe(p.id) }}
+                        style={{ flexShrink: 0, padding: "3px 8px", fontSize: 9, fontWeight: 700, background: C.card, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", color: C.muted }}>
+                        Restore
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Map Views list */}
         <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 0", maxHeight: 180, overflowY: "auto" }}>
           <div style={{ padding: "0 16px 8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -2730,7 +2953,7 @@ export default function App() {
                   <div style={{ fontSize: 11, fontWeight: 600, color: sel ? C.cyan : C.muted }}>
                     {mapImage ? "Site Plan" : "Main Map"}
                   </div>
-                  <div style={{ fontSize: 9, color: C.dim }}>{assets.length} assets · default</div>
+                  <div style={{ fontSize: 9, color: C.dim }}>{assets.filter(a=>!a.archived).length} assets · default</div>
                 </div>
               </div>
             )
@@ -3279,7 +3502,7 @@ export default function App() {
               )
             })()}
 
-            {pipes.map(pipe => {
+            {pipes.filter(p => !p.archived).map(pipe => {
               const fr = assets.find(a => a.id === pipe.fromId)
               const frX = fr ? fr.x : (pipe.fromX ?? 0)
               const frY = fr ? fr.y : (pipe.fromY ?? 0)
@@ -3483,7 +3706,7 @@ export default function App() {
           </svg>
 
           {/* Asset nodes */}
-          {assets.map(asset => {
+          {assets.filter(a => !a.archived).map(asset => {
             const assetOutOfView = activeViewIncludedAssets ? !activeViewIncludedAssets.includes(asset.id) : false
             return (
               <AssetNode
@@ -3718,6 +3941,20 @@ export default function App() {
         {/* Asset detail */}
         {selectedAsset && !selectedPipeId && (
           <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", touchAction: "pan-y" }}>
+            {selectedAsset?.archived && (
+              <div style={{ margin: "12px 16px 0", padding: "10px 14px", background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 6 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#92400E", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4 }}>
+                  ⚠ Archived — {selectedAsset.archiveReason}
+                </div>
+                <div style={{ fontSize: 10, color: "#92400E", marginBottom: 6 }}>
+                  Archived by {SITE_PERSONS.find(p => p.id === selectedAsset.archivedById)?.name ?? "—"} · {selectedAsset.archivedOn ? new Date(selectedAsset.archivedOn).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""}
+                </div>
+                <button onClick={() => restoreAsset(selectedAsset.id)}
+                  style={{ padding: "5px 12px", fontSize: 11, fontWeight: 700, background: "#D97706", border: "none", borderRadius: 4, cursor: "pointer", color: "#fff" }}>
+                  Restore
+                </button>
+              </div>
+            )}
             <Section>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <div>
@@ -4116,6 +4353,20 @@ export default function App() {
         {/* Pipe detail */}
         {selectedPipe && (
           <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", touchAction: "pan-y" }}>
+            {selectedPipe?.archived && (
+              <div style={{ margin: "12px 16px 0", padding: "10px 14px", background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 6 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#92400E", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4 }}>
+                  ⚠ Archived — {selectedPipe.archiveReason}
+                </div>
+                <div style={{ fontSize: 10, color: "#92400E", marginBottom: 6 }}>
+                  Archived by {SITE_PERSONS.find(p => p.id === selectedPipe.archivedById)?.name ?? "—"} · {selectedPipe.archivedOn ? new Date(selectedPipe.archivedOn).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""}
+                </div>
+                <button onClick={() => restorePipe(selectedPipe.id)}
+                  style={{ padding: "5px 12px", fontSize: 11, fontWeight: 700, background: "#D97706", border: "none", borderRadius: 4, cursor: "pointer", color: "#fff" }}>
+                  Restore
+                </button>
+              </div>
+            )}
 
             {/* Pipe header */}
             <Section>
@@ -5761,7 +6012,7 @@ export default function App() {
                             )}
 
                             {/* Pipes — clickable */}
-                            {pipes.map(pipe => {
+                            {pipes.filter(p => !p.archived).map(pipe => {
                               const fr = assets.find(a => a.id === pipe.fromId)
                               if (!fr && pipe.fromId !== "free") return null
                               const frX = fr ? fr.x : (pipe.fromX ?? 0)
@@ -5800,7 +6051,7 @@ export default function App() {
                           </svg>
 
                           {/* Asset dots — clickable */}
-                          {assets.map(a => {
+                          {assets.filter(a => !a.archived).map(a => {
                             const included = pendingViewAssets.includes(a.id)
                             return (
                               <div
@@ -5891,6 +6142,112 @@ export default function App() {
           </div>
         </div>
       )}
+      {/* ── ARCHIVE DIALOG ─────────────────────────────────────────────────────── */}
+      {archiveDialog && (() => {
+        const rec = archiveDialog.type === "asset"
+          ? assets.find(x => x.id === archiveDialog.id)
+          : pipes.find(x => x.id === archiveDialog.id)
+        if (!rec) return null
+        const isAsset = archiveDialog.type === "asset"
+        const connectedPipes = isAsset ? pipes.filter(p => p.fromId === archiveDialog.id || p.toId === archiveDialog.id) : []
+        const assetRec = isAsset ? assets.find(x => x.id === archiveDialog.id) : null
+        const hasObs = assetRec ? ((assetRec.conditionRating !== undefined) || ((assetRec.videos ?? []).length > 0)) : false
+        const hasVideos = !isAsset ? ((rec as Pipe).videos.length > 0) : false
+        const tier = archiveDialog.tier
+
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ position: "absolute", inset: 0, background: "rgba(15,25,35,0.45)", backdropFilter: "blur(2px)" }} onClick={() => setArchiveDialog(null)} />
+            <div style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24, width: 460, boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: tier === "archive" ? "#D97706" : "#DC2626", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 14 }}>
+                {tier === "archive" ? `Archive ${rec.label}?` : `Delete ${rec.label}?`}
+              </div>
+
+              {tier === "archive" ? (
+                <>
+                  <div style={{ fontSize: 13, color: C.text, marginBottom: 8 }}>
+                    {isAsset ? `${assetRec?.type}` : `${(rec as Pipe).label}`}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.dim, marginBottom: 12, padding: "10px 12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                    This has history attached and will be archived, not deleted:
+                    {hasObs && <div style={{ marginTop: 6, color: C.muted }}>• Observations and condition data</div>}
+                    {hasVideos && <div style={{ marginTop: 4, color: C.muted }}>• {(rec as Pipe).videos.length} camera inspection{(rec as Pipe).videos.length !== 1 ? "s" : ""}</div>}
+                    {connectedPipes.length > 0 && <div style={{ marginTop: 4, color: C.muted }}>• {connectedPipes.length} connected pipe{connectedPipes.length !== 1 ? "s" : ""} — {connectedPipes.map(p => p.label).join(", ")}</div>}
+                  </div>
+
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 5 }}>Reason *</div>
+                    <select value={archiveDialog.archiveReason}
+                      onChange={e => setArchiveDialog(prev => prev ? { ...prev, archiveReason: e.target.value } : null)}
+                      style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${archiveDialog.archiveReason ? C.border : "#EF4444"}`, borderRadius: 5, color: archiveDialog.archiveReason ? C.text : C.muted, outline: "none" }}>
+                      <option value="">Select…</option>
+                      {ARCHIVE_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
+
+                  {isAsset && connectedPipes.length > 0 && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: C.muted, marginBottom: 14, cursor: "pointer" }}>
+                      <input type="checkbox" checked={archiveDialog.alsoArchivePipes}
+                        onChange={e => setArchiveDialog(prev => prev ? { ...prev, alsoArchivePipes: e.target.checked } : null)} />
+                      Also archive the {connectedPipes.length} connected pipe{connectedPipes.length !== 1 ? "s" : ""}
+                    </label>
+                  )}
+
+                  <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                    <button onClick={() => setArchiveDialog(null)}
+                      style={{ padding: "8px 18px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer", color: C.muted }}>
+                      Cancel
+                    </button>
+                    <button onClick={() => {
+                        if (!archiveDialog.archiveReason) return
+                        if (isAsset) commitArchiveAsset(archiveDialog.id, archiveDialog.archiveReason, archiveDialog.alsoArchivePipes)
+                        else commitArchivePipe(archiveDialog.id, archiveDialog.archiveReason)
+                      }}
+                      disabled={!archiveDialog.archiveReason}
+                      style={{ padding: "8px 18px", fontSize: 11, fontWeight: 700, background: archiveDialog.archiveReason ? "#D97706" : C.card, border: "none", borderRadius: 5, cursor: archiveDialog.archiveReason ? "pointer" : "not-allowed", color: archiveDialog.archiveReason ? "#fff" : C.dim }}>
+                      Archive
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 11, color: C.dim, marginBottom: 14, lineHeight: 1.6 }}>
+                    Added during this visit with nothing attached — no observations, photos or pipes.<br />
+                    This will be removed completely.
+                  </div>
+                  <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                    <button onClick={() => setArchiveDialog(null)}
+                      style={{ padding: "8px 18px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer", color: C.muted }}>
+                      Cancel
+                    </button>
+                    <button onClick={() => {
+                        if (isAsset) commitDeleteAsset(archiveDialog.id)
+                        else commitDeletePipe(archiveDialog.id)
+                      }}
+                      style={{ padding: "8px 18px", fontSize: 11, fontWeight: 700, background: "#DC2626", border: "none", borderRadius: 5, cursor: "pointer", color: "#fff" }}>
+                      Delete
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── UNDO TOAST ─────────────────────────────────────────────────────────── */}
+      {undoToast && (
+        <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 500, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 8px 32px #0006", minWidth: 280 }}>
+          <span style={{ fontSize: 12, color: C.text, flex: 1 }}>{undoToast.label}</span>
+          <button onClick={() => { undoToast.onUndo(); clearTimeout(undoToast.timer); setUndoToast(null) }}
+            style={{ padding: "4px 12px", fontSize: 11, fontWeight: 700, background: C.cyan, border: "none", borderRadius: 4, cursor: "pointer", color: "#fff" }}>
+            Undo
+          </button>
+          <button onClick={() => { clearTimeout(undoToast.timer); setUndoToast(null) }}
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: C.muted, padding: "2px 4px" }}>✕</button>
+        </div>
+      )}
+
       </div>{/* end 3-col row wrapper */}
     </div>
   )
