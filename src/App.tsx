@@ -557,7 +557,7 @@ function AssetIcon({ type, sel, c, size = 28 }: { type: AssetType; sel: boolean;
 
 function AssetNode({ asset, selected, drawActive, scale, onClick, onMouseDown, onTouchStart, dimmed }: {
   asset: Asset; selected: boolean; drawActive: boolean; scale: number; dimmed?: boolean
-  onClick: () => void; onMouseDown: (e: React.MouseEvent) => void; onTouchStart?: (e: React.TouchEvent) => void
+  onClick: (e: React.MouseEvent) => void; onMouseDown: (e: React.MouseEvent) => void; onTouchStart?: (e: React.TouchEvent) => void
 }) {
   const c = drawActive ? "#F59E0B" : "#1a1a1a"
   return (
@@ -571,9 +571,9 @@ function AssetNode({ asset, selected, drawActive, scale, onClick, onMouseDown, o
         opacity: dimmed ? 0.25 : 1,
         transition: "filter 0.2s, transform 0.15s, opacity 0.2s",
       }}
-      onClick={onClick}
+      onClick={e => { e.stopPropagation(); onClick(e) }}
       onMouseDown={onMouseDown}
-      onTouchStart={onTouchStart}
+      onTouchStart={e => { e.stopPropagation(); onTouchStart?.(e) }}
     >
       <AssetIcon type={asset.type} sel={selected} c={c} size={28} />
       <div style={{
@@ -1205,6 +1205,7 @@ export default function App() {
   // Logistics + contacts (right panel, property level)
   const [logistics, setLogistics] = useState<LogisticsEntry[]>([])
   const [contacts, setContacts] = useState<ContactEntry[]>([])
+  const [lightbox, setLightbox] = useState<{ srcs: string[]; labels: string[]; idx: number } | null>(null)
   const [showAddLogistics, setShowAddLogistics] = useState(false)
   const [logisticsForm, setLogisticsForm] = useState({ category: "", note: "" })
   const [showAddContact, setShowAddContact] = useState(false)
@@ -2157,7 +2158,10 @@ export default function App() {
   function fmtElapsed(s: number): string {
     const h = Math.floor(s / 3600)
     const m = Math.floor((s % 3600) / 60)
-    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+    const sec = s % 60
+    return h > 0
+      ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+      : `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
   }
 
   // ── Render ───────────────────────────────────────────────────────────────────
@@ -3860,7 +3864,7 @@ export default function App() {
                 selected={selectedAssetId === asset.id}
                 drawActive={drawFrom === asset.id}
                 scale={iconScaleByType[asset.type] ?? 1}
-                onClick={() => handleAssetClick(asset.id)}
+                onClick={_e => handleAssetClick(asset.id)}
                 onMouseDown={e => handleAssetMouseDown(e, asset.id)}
                 onTouchStart={e => {
                   if (e.touches.length !== 1) return
@@ -4210,7 +4214,12 @@ export default function App() {
                       if (src) {
                         return (
                           <div key={lbl} style={{ borderRadius: 6, border: `1px solid ${C.border}`, overflow: "hidden", background: C.card }}>
-                            <img src={src} alt={lbl} style={{ width: "100%", height: 100, objectFit: "cover", display: "block" }} />
+                            <img src={src} alt={lbl}
+                              style={{ width: "100%", height: 100, objectFit: "cover", display: "block", cursor: "zoom-in" }}
+                              onDoubleClick={() => {
+                                const filledSrcs = photos.map((s, i) => ({ s, i })).filter(x => x.s)
+                                setLightbox({ srcs: filledSrcs.map(x => x.s), labels: filledSrcs.map(x => photoLabels[x.i]), idx: filledSrcs.findIndex(x => x.i === idx) })
+                              }} />
                             <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                               <span style={{ fontSize: 10, color: C.muted, fontWeight: 600 }}>{lbl}</span>
                               <button onClick={() => removePhoto(idx)} style={{ fontSize: 9, color: "#EF4444", background: "none", border: "none", cursor: "pointer", fontWeight: 700 }}>Remove</button>
@@ -6435,6 +6444,49 @@ export default function App() {
                 </>
               )}
             </div>
+          </div>
+        )
+      })()}
+
+      {/* ── PHOTO LIGHTBOX ─────────────────────────────────────────────────────── */}
+      {lightbox && (() => {
+        const { srcs, labels, idx } = lightbox
+        const prev = () => setLightbox(lb => lb ? { ...lb, idx: (lb.idx - 1 + lb.srcs.length) % lb.srcs.length } : null)
+        const next = () => setLightbox(lb => lb ? { ...lb, idx: (lb.idx + 1) % lb.srcs.length } : null)
+        const close = () => setLightbox(null)
+        return (
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 600, background: "rgba(15,23,42,0.88)", display: "flex", alignItems: "center", justifyContent: "center" }}
+            onClick={close}
+            onKeyDown={e => { if (e.key === "Escape") close(); if (e.key === "ArrowLeft") prev(); if (e.key === "ArrowRight") next() }}
+            tabIndex={-1}
+            ref={el => el?.focus()}
+          >
+            {/* Counter top-left */}
+            <div style={{ position: "absolute", top: 20, left: 24, fontSize: 11, color: "rgba(255,255,255,0.6)", fontFamily: "JetBrains Mono" }}>
+              {idx + 1} of {srcs.length}
+            </div>
+            {/* Close top-right */}
+            <button onClick={e => { e.stopPropagation(); close() }}
+              style={{ position: "absolute", top: 16, right: 20, background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.7)", fontSize: 22, lineHeight: 1, padding: 6 }}>✕</button>
+            {/* Left arrow */}
+            {srcs.length > 1 && (
+              <button onClick={e => { e.stopPropagation(); prev() }}
+                style={{ position: "absolute", left: 20, background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, cursor: "pointer", color: "#fff", fontSize: 20, padding: "10px 14px" }}>‹</button>
+            )}
+            {/* Image */}
+            <div onClick={e => e.stopPropagation()} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, maxWidth: "90vw", maxHeight: "90vh" }}>
+              <img src={srcs[idx]} alt={labels[idx]}
+                style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain", borderRadius: 6, boxShadow: "0 20px 80px #000a" }} />
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "rgba(255,255,255,0.85)" }}>{labels[idx]}</div>
+              </div>
+            </div>
+            {/* Right arrow */}
+            {srcs.length > 1 && (
+              <button onClick={e => { e.stopPropagation(); next() }}
+                style={{ position: "absolute", right: 20, background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, cursor: "pointer", color: "#fff", fontSize: 20, padding: "10px 14px" }}>›</button>
+            )}
           </div>
         )
       })()}
