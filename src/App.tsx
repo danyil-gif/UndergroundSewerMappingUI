@@ -184,6 +184,105 @@ interface Observation {
   cippNotes?: string
 }
 
+// ── Visit / Session types ──────────────────────────────────────────────────────
+
+interface LogisticsEntry { id: string; category: string; note: string; addedBy: string; visitId: string | null }
+interface ContactEntry { id: string; name: string; role: string; phone: string; email: string; bestContact: string; notes: string }
+
+interface VisitLogEntry {
+  id: string
+  at: number
+  text: string
+  recordType?: "asset" | "pipe" | "inspection" | "observation" | "media" | "logistics" | "contact"
+  recordId?: string
+}
+
+interface Visit {
+  id: string
+  jobId: string | null
+  property: string
+  visitType: string
+  personId: string
+  technicianIds: string[]
+  startedAt: number
+  endedAt: number | null
+  officeUpdateReason?: string
+  visitNote?: string
+  log: VisitLogEntry[]
+  acceptedAtClose?: { item: string; reason: string }[]
+  reportStatus?: "draft" | "in review" | "sent"
+}
+
+// ── Site people ───────────────────────────────────────────────────────────────
+
+const SITE_PERSONS = [
+  { id: "p-dino",      name: "Dino",      role: "Manager" },
+  { id: "p-nicholas",  name: "Nicholas",  role: "Technician" },
+  { id: "p-alexis",    name: "Alexis",    role: "Technician" },
+  { id: "p-christian", name: "Christian", role: "Project Lead" },
+  { id: "p-joshua",    name: "Joshua",    role: "Sales" },
+]
+
+// ── Sample jobs ───────────────────────────────────────────────────────────────
+
+const SAMPLE_JOBS = [
+  { id: "j1", group: "today",     when: "8:40 AM", number: "#48812", jobType: "Emergency",          property: "Willow Creek Condominium Association",      summary: "Sewer backup, Bldg 3 laundry" },
+  { id: "j2", group: "scheduled", when: "Mar 22",  number: "#48901", jobType: "Reserve Study",       property: "Lakeview Terrace HOA",                      summary: "Full property survey" },
+  { id: "j3", group: "scheduled", when: "Mar 28",  number: "#48910", jobType: "Hydro-Jetting",       property: "Elmwood Court",                             summary: "Annual main line cleaning" },
+  { id: "j4", group: "recent",    when: "Mar 08",  number: "#48770", jobType: "Diagnostic",          property: "Willow Creek Condominium Association",      summary: "Slow drains, Bldg 1" },
+  { id: "j5", group: "recent",    when: "Mar 05",  number: "#48755", jobType: "Excavation",          property: "Lakeview Terrace HOA",                      summary: "Collapsed section, parking lot" },
+  { id: "j6", group: "recent",    when: "Feb 28",  number: "#48720", jobType: "CIPP Feasibility",    property: "Elmwood Court",                             summary: "Pre-liner assessment" },
+]
+
+const VISIT_TYPES = [
+  "Diagnostic Site Visit", "Emergency Call", "Hydro-Jetting Estimate Survey",
+  "Hydro-Jetting", "Rodding / Cable Machine", "Descaling", "CIPP Feasibility",
+  "CIPP Installation", "Excavation", "Post-Repair Verification",
+  "Sewer Infrastructure Master Plan", "Office Update", "Other",
+]
+
+const ALL_PROPERTIES = [...new Set(SAMPLE_JOBS.map(j => j.property))]
+
+const LOGISTICS_CATEGORIES = [
+  "Parking & truck staging", "Building access", "Lockbox and keys",
+  "Basement or mechanical access", "Utility shutoffs", "Excavation staging",
+  "Restoration reference", "Hazards and constraints",
+]
+
+const CONTACT_ROLES = ["Property manager", "On-site maintenance", "Board president", "Board member", "After-hours", "Other"]
+const CONTACT_METHODS = ["Call", "Text", "Email"]
+
+// ── Seed closed visits ────────────────────────────────────────────────────────
+
+function makeLog(entries: string[]): VisitLogEntry[] {
+  return entries.map((text, i) => ({ id: `l${i}`, at: Date.now() - (entries.length - i) * 600000, text }))
+}
+
+const SEED_VISITS: Visit[] = [
+  {
+    id: "sv1", jobId: "j4", property: "Willow Creek Condominium Association",
+    visitType: "Emergency Call", personId: "p-nicholas", technicianIds: ["p-nicholas", "p-alexis"],
+    startedAt: Date.now() - 86400000 * 3 - 4140000, endedAt: Date.now() - 86400000 * 3,
+    log: makeLog(["Visit started", "COF-01 created — Clean-out, Laundry room", "COF-01 condition — Good", "P-01 camera inspection — 0 to 70 ft", "P-01 3 observations logged", "P-02 camera inspection — blocked at 18 ft"]),
+    reportStatus: "draft",
+    acceptedAtClose: [{ item: "10 assets — no photos", reason: "Light inventory pass, to be documented if the reserve study proceeds." }],
+  },
+  {
+    id: "sv2", jobId: "j5", property: "Lakeview Terrace HOA",
+    visitType: "Excavation", personId: "p-christian", technicianIds: ["p-christian", "p-dino"],
+    startedAt: Date.now() - 86400000 * 6 - 9600000, endedAt: Date.now() - 86400000 * 6,
+    log: makeLog(["Visit started", "Excavation site marked", "P-03 pipe section exposed", "P-03 material confirmed — Cast Iron", "1 work event logged — debris removed"]),
+    reportStatus: "in review",
+  },
+  {
+    id: "sv3", jobId: "j4", property: "Willow Creek Condominium Association",
+    visitType: "Diagnostic Site Visit", personId: "p-alexis", technicianIds: ["p-alexis"],
+    startedAt: Date.now() - 86400000 * 10 - 7380000, endedAt: Date.now() - 86400000 * 10,
+    log: makeLog(["Visit started", "11 assets surveyed", "4 pipes inspected", "CB-03 condition — Poor", "P-04 camera run — 0 to 45 ft"]),
+    reportStatus: "sent",
+  },
+]
+
 // ── Asset type metadata ────────────────────────────────────────────────────────
 
 const ASSET_META: Record<AssetType, { label: string; abbr: string; shape: "circle"|"square"|"diamond"|"triangle"|"hexagon"; group: string }> = {
@@ -1056,7 +1155,40 @@ export default function App() {
   const [hoverPipeId, setHoverPipeId] = useState<string | null>(null)
   const [leftPanelOpen, setLeftPanelOpen] = useState(true)
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
-  const [leftSectionOpen, setLeftSectionOpen] = useState({ infra: true, assets: true, pipes: true })
+  const [leftSectionOpen, setLeftSectionOpen] = useState({ infra: true, assets: true, pipes: true, visits: false })
+  // ── Visit / session state ───────────────────────────────────────────────────
+  const [appView, setAppView] = useState<"launch" | "simd">("launch")
+  const [browseMode, setBrowseMode] = useState(false)
+  const [selectedPersonId, setSelectedPersonId] = useState<string | null>(null)
+  const [visits, setVisits] = useState<Visit[]>(SEED_VISITS)
+  const [currentVisitId, setCurrentVisitId] = useState<string | null>(null)
+  const [viewingVisitId, setViewingVisitId] = useState<string | null>(null)
+  const [showVisitLog, setShowVisitLog] = useState(false)
+  const [showCloseVisit, setShowCloseVisit] = useState(false)
+  const [visitLogHighlight, setVisitLogHighlight] = useState(false)
+  // Launch form state
+  const [launchJobId, setLaunchJobId] = useState("")
+  const [launchVisitType, setLaunchVisitType] = useState("")
+  const [launchTechIds, setLaunchTechIds] = useState<string[]>([])
+  const [launchOfficeMode, setLaunchOfficeMode] = useState(false)
+  const [launchOfficeProperty, setLaunchOfficeProperty] = useState("")
+  const [launchOfficeReason, setLaunchOfficeReason] = useState("")
+  const [launchBrowseProperty, setLaunchBrowseProperty] = useState("")
+  const [showLaunchBrowsePicker, setShowLaunchBrowsePicker] = useState(false)
+  const [historyPersonFilter, setHistoryPersonFilter] = useState("all")
+  const [historyRangeFilter, setHistoryRangeFilter] = useState("30")
+  const [historyShowAll, setHistoryShowAll] = useState(false)
+  // Close visit state
+  const [closeVisitNote, setCloseVisitNote] = useState("")
+  const [closeAccepted, setCloseAccepted] = useState<Record<string, string>>({})
+  const [elapsed, setElapsed] = useState(0)
+  // Logistics + contacts (right panel, property level)
+  const [logistics, setLogistics] = useState<LogisticsEntry[]>([])
+  const [contacts, setContacts] = useState<ContactEntry[]>([])
+  const [showAddLogistics, setShowAddLogistics] = useState(false)
+  const [logisticsForm, setLogisticsForm] = useState({ category: "", note: "" })
+  const [showAddContact, setShowAddContact] = useState(false)
+  const [contactForm, setContactForm] = useState({ name: "", role: "", phone: "", email: "", bestContact: "", notes: "" })
   const [iconScaleByType, setIconScaleByType] = useState<Record<AssetType, number>>(Object.fromEntries(ALL_ASSET_TYPES.map(t => [t, 1])) as Record<AssetType, number>)
   const [pipeScale, setPipeScale] = useState(1)
   const [globalIconScale, setGlobalIconScale] = useState(1)
@@ -1768,6 +1900,80 @@ export default function App() {
     setEditViewName("")
   }
 
+  // ── Visit helpers ────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!currentVisitId) { setElapsed(0); return }
+    const cv = visits.find(v => v.id === currentVisitId)
+    if (!cv) return
+    const tick = () => setElapsed(Math.floor((Date.now() - cv.startedAt) / 1000))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [currentVisitId, visits])
+
+  function appendLog(text: string) {
+    if (!currentVisitId) return
+    const entry: VisitLogEntry = { id: `le${Date.now()}`, at: Date.now(), text }
+    setVisits(vs => vs.map(v => v.id === currentVisitId ? { ...v, log: [...v.log, entry] } : v))
+    setVisitLogHighlight(true)
+    setTimeout(() => setVisitLogHighlight(false), 1800)
+  }
+
+  function startVisit() {
+    const job = SAMPLE_JOBS.find(j => j.id === launchJobId) ?? null
+    const person = SITE_PERSONS.find(p => p.id === selectedPersonId)
+    if (!person) return
+    const property = launchOfficeMode ? launchOfficeProperty : (job?.property ?? "")
+    const vt = launchOfficeMode ? "Office Update" : launchVisitType
+    const newVisit: Visit = {
+      id: `v${Date.now()}`, jobId: launchJobId || null, property, visitType: vt,
+      personId: person.id, technicianIds: launchTechIds,
+      startedAt: Date.now(), endedAt: null,
+      officeUpdateReason: launchOfficeMode ? launchOfficeReason : undefined,
+      log: [{ id: "l0", at: Date.now(), text: "Visit started" }],
+    }
+    setVisits(vs => [newVisit, ...vs])
+    setCurrentVisitId(newVisit.id)
+    setBrowseMode(false)
+    setViewingVisitId(null)
+    setShowVisitLog(false)
+    setAppView("simd")
+  }
+
+  function closeVisit() {
+    if (!currentVisitId) return
+    setVisits(vs => vs.map(v => v.id === currentVisitId
+      ? { ...v, endedAt: Date.now(), visitNote: closeVisitNote, acceptedAtClose: Object.entries(closeAccepted).map(([item, reason]) => ({ item, reason })) }
+      : v))
+    setCurrentVisitId(null)
+    setSelectedPersonId(null)
+    setLaunchJobId("")
+    setLaunchVisitType("")
+    setLaunchTechIds([])
+    setLaunchOfficeMode(false)
+    setLaunchOfficeProperty("")
+    setLaunchOfficeReason("")
+    setCloseVisitNote("")
+    setCloseAccepted({})
+    setShowCloseVisit(false)
+    setShowVisitLog(false)
+    setViewingVisitId(null)
+    setAppView("launch")
+  }
+
+  function fmtDuration(ms: number): string {
+    const h = Math.floor(ms / 3600000)
+    const m = Math.floor((ms % 3600000) / 60000)
+    return h > 0 ? `${h}h ${m}m` : `${m}m`
+  }
+
+  function fmtElapsed(s: number): string {
+    const h = Math.floor(s / 3600)
+    const m = Math.floor((s % 3600) / 60)
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+  }
+
   // ── Render ───────────────────────────────────────────────────────────────────
 
   const activeView = activeTabId !== "main" ? (mapViews.find(v => v.id === activeTabId) ?? null) : null
@@ -1799,21 +2005,462 @@ export default function App() {
   const panelW = panelOpen ? (selectedVideo ? 540 : 364) : 0
   const effectivePanelW = (panelOpen && rightPanelOpen) ? (selectedPipeId ? pipePanelW : selectedVideo ? 540 : 364) : 0
 
+  // ── Visit derived ─────────────────────────────────────────────────────────
+  const currentVisit = currentVisitId ? visits.find(v => v.id === currentVisitId) ?? null : null
+  const viewingVisit = viewingVisitId ? visits.find(v => v.id === viewingVisitId) ?? null : null
+  const selectedPerson = SITE_PERSONS.find(p => p.id === selectedPersonId) ?? null
+  const launchJob = SAMPLE_JOBS.find(j => j.id === launchJobId) ?? null
+
+  const launchCanStart = selectedPersonId !== null && launchTechIds.length > 0 && (
+    launchOfficeMode
+      ? launchOfficeProperty !== "" && launchOfficeReason.trim() !== ""
+      : launchJobId !== "" && launchVisitType !== ""
+  )
+  const launchHint = !selectedPersonId ? "Select who you are"
+    : !launchOfficeMode && !launchJobId ? "Select a job"
+    : launchTechIds.length === 0 ? "Select at least one technician"
+    : launchOfficeMode && !launchOfficeProperty ? "Select a property"
+    : launchOfficeMode && !launchOfficeReason.trim() ? "Enter a reason for this update"
+    : ""
+
+  const closedVisits = visits.filter(v => v.endedAt !== null).sort((a, b) => b.startedAt - a.startedAt)
+  const historyFiltered = closedVisits.filter(v => {
+    if (historyPersonFilter !== "all" && v.personId !== historyPersonFilter) return false
+    if (historyRangeFilter !== "all") {
+      const days = Number(historyRangeFilter)
+      if (v.startedAt < Date.now() - days * 86400000) return false
+    }
+    return true
+  })
+  const historyVisible = historyShowAll ? historyFiltered : historyFiltered.slice(0, 5)
+
+  // ── Launch screen ─────────────────────────────────────────────────────────
+  if (appView === "launch") {
+    const LogoMark = () => (
+      <svg width="36" height="36" viewBox="0 0 22 22" fill="none">
+        <circle cx="11" cy="11" r="10" stroke={C.cyan} strokeWidth="1.5" />
+        <circle cx="11" cy="11" r="6" stroke={C.cyan} strokeWidth="0.8" strokeDasharray="3 2" opacity="0.5" />
+        <circle cx="11" cy="11" r="2.5" fill={C.cyan} />
+        <line x1="11" y1="1" x2="11" y2="5" stroke={C.cyan} strokeWidth="1.2" strokeLinecap="round" />
+        <line x1="11" y1="17" x2="11" y2="21" stroke={C.cyan} strokeWidth="1.2" strokeLinecap="round" />
+        <line x1="1" y1="11" x2="5" y2="11" stroke={C.cyan} strokeWidth="1.2" strokeLinecap="round" />
+        <line x1="17" y1="11" x2="21" y2="11" stroke={C.cyan} strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    )
+    const sectionLabel = (text: string) => (
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{text}</span>
+        <div style={{ flex: 1, height: 1, background: C.border }} />
+      </div>
+    )
+
+    return (
+      <div style={{ height: "100dvh", background: C.bg, fontFamily: "'DM Sans', sans-serif", color: C.text, overflow: "auto", display: "flex", flexDirection: "column" }}>
+        {/* top bar with logo */}
+        <div style={{ padding: "20px 32px 0", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <LogoMark />
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>SewerMap Pro</div>
+            <div style={{ fontSize: 9, color: C.blue, fontFamily: "JetBrains Mono", letterSpacing: "0.1em" }}>UNDERGROUND INFRASTRUCTURE</div>
+          </div>
+        </div>
+
+        {/* two-column area */}
+        <div style={{ flex: 1, display: "flex", gap: 24, padding: "28px 32px 32px", flexWrap: "wrap", alignItems: "flex-start", minHeight: 0 }}>
+
+          {/* ── LEFT: Start a visit ── */}
+          <div style={{ flex: "1 1 480px", maxWidth: 540, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "24px 24px 20px", display: "flex", flexDirection: "column", gap: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.text, letterSpacing: "0.06em", textTransform: "uppercase", borderBottom: `1px solid ${C.border}`, paddingBottom: 12 }}>Start a visit</div>
+
+            {/* WHO ARE YOU */}
+            <div>
+              {sectionLabel("Who are you?")}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                {SITE_PERSONS.map(p => {
+                  const sel = selectedPersonId === p.id
+                  return (
+                    <button key={p.id} onClick={() => {
+                      setSelectedPersonId(p.id)
+                      setLaunchTechIds(prev => prev.includes(p.id) ? prev : [...prev, p.id])
+                    }}
+                      style={{ padding: "12px 10px", borderRadius: 7, border: `1.5px solid ${sel ? C.cyan : C.border}`, background: sel ? C.cyan : C.card, cursor: "pointer", textAlign: "left", transition: "all 0.12s" }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: sel ? "#fff" : C.text, marginBottom: 1 }}>{p.name}</div>
+                      <div style={{ fontSize: 9.5, color: sel ? "rgba(255,255,255,0.75)" : C.muted }}>{p.role}</div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* rest locked until person chosen */}
+            <div style={{ opacity: selectedPersonId ? 1 : 0.38, pointerEvents: selectedPersonId ? "auto" : "none", transition: "opacity 0.2s", display: "flex", flexDirection: "column", gap: 18 }}>
+
+              {/* JOB */}
+              {!launchOfficeMode ? (
+                <div>
+                  {sectionLabel("Job")}
+                  {(["today", "scheduled", "recent"] as const).map(grp => {
+                    const jobs = SAMPLE_JOBS.filter(j => j.group === grp)
+                    if (jobs.length === 0) return null
+                    return (
+                      <div key={grp} style={{ marginBottom: 8 }}>
+                        <div style={{ fontSize: 8.5, fontWeight: 700, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{grp}</div>
+                        {jobs.map(j => {
+                          const sel = launchJobId === j.id
+                          return (
+                            <button key={j.id} onClick={() => { setLaunchJobId(j.id); setLaunchVisitType(j.jobType) }}
+                              style={{ width: "100%", display: "flex", gap: 10, padding: "9px 10px", marginBottom: 3, borderRadius: 6, background: sel ? C.cyan + "12" : C.card, border: `1.5px solid ${sel ? C.cyan : C.border}`, cursor: "pointer", textAlign: "left" }}>
+                              <div style={{ width: 16, height: 16, borderRadius: "50%", border: `1.5px solid ${sel ? C.cyan : C.border}`, background: sel ? C.cyan : "transparent", flexShrink: 0, marginTop: 2, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                {sel && <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#fff" }} />}
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                                  <span style={{ fontSize: 10, color: C.dim, fontFamily: "JetBrains Mono", flexShrink: 0 }}>{j.when}</span>
+                                  <span style={{ fontSize: 10, fontWeight: 700, color: sel ? C.cyan : C.text, fontFamily: "JetBrains Mono" }}>{j.number}</span>
+                                  <span style={{ fontSize: 10, color: C.muted }}>{j.jobType}</span>
+                                </div>
+                                <div style={{ fontSize: 9.5, color: C.dim, marginTop: 1 }}>{j.property} · {j.summary}</div>
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )
+                  })}
+                  <button onClick={() => { setLaunchOfficeMode(true); setLaunchJobId(""); setLaunchVisitType("Office Update") }}
+                    style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: C.muted, textDecoration: "underline", padding: "2px 0" }}>
+                    No job — office update
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  {sectionLabel("Office update")}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>Property *</div>
+                      <select value={launchOfficeProperty} onChange={e => setLaunchOfficeProperty(e.target.value)}
+                        style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none" }}>
+                        <option value="">Select property…</option>
+                        {ALL_PROPERTIES.map(p => <option key={p} value={p}>{p}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>Reason for the change *</div>
+                      <textarea value={launchOfficeReason} onChange={e => setLaunchOfficeReason(e.target.value)} rows={3}
+                        placeholder="Describe what is being corrected…"
+                        style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
+                    </div>
+                    <div style={{ fontSize: 9.5, color: C.muted, fontStyle: "italic", lineHeight: 1.5 }}>
+                      Recorded as an office correction, not a field observation, and labelled as such in any report.
+                    </div>
+                    <button onClick={() => { setLaunchOfficeMode(false); setLaunchJobId(""); setLaunchVisitType("") }}
+                      style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: C.muted, textDecoration: "underline", padding: "2px 0", textAlign: "left" }}>
+                      ← Back to job list
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* VISIT TYPE */}
+              <div>
+                {sectionLabel("Visit type")}
+                <select value={launchVisitType} onChange={e => setLaunchVisitType(e.target.value)}
+                  style={{ width: "100%", padding: "9px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: launchVisitType ? C.text : C.muted, outline: "none" }}>
+                  <option value="">Select visit type…</option>
+                  {VISIT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+
+              {/* TECHNICIANS */}
+              <div>
+                {sectionLabel("Technicians on site")}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {SITE_PERSONS.map(p => {
+                    const sel = launchTechIds.includes(p.id)
+                    return (
+                      <button key={p.id} onClick={() => setLaunchTechIds(prev => sel ? prev.filter(id => id !== p.id) : [...prev, p.id])}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 6, border: `1.5px solid ${sel ? C.cyan : C.border}`, background: sel ? C.cyan + "12" : C.card, cursor: "pointer" }}>
+                        <div style={{ width: 13, height: 13, borderRadius: 3, background: sel ? C.cyan : C.panel, border: `1.5px solid ${sel ? C.cyan : C.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          {sel && <svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M1.5 4l2 2 3-3" stroke="#fff" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 500, color: sel ? C.cyan : C.muted }}>{p.name}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* START VISIT + browse */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 6, paddingTop: 4 }}>
+              <button onClick={startVisit} disabled={!launchCanStart}
+                style={{ padding: "12px", fontSize: 13, fontWeight: 700, background: launchCanStart ? C.cyan : C.card, color: launchCanStart ? "#fff" : C.dim, border: `1px solid ${launchCanStart ? C.cyan : C.border}`, borderRadius: 7, cursor: launchCanStart ? "pointer" : "not-allowed", letterSpacing: "0.04em", transition: "all 0.15s" }}>
+                Start visit
+              </button>
+              {launchHint && <div style={{ textAlign: "center", fontSize: 10.5, color: C.muted, fontStyle: "italic" }}>{launchHint}</div>}
+              {!showLaunchBrowsePicker ? (
+                <button onClick={() => setShowLaunchBrowsePicker(true)}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: C.muted, textDecoration: "underline", padding: "4px 0", textAlign: "center" }}>
+                  Browse without a visit
+                </button>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <select value={launchBrowseProperty} onChange={e => setLaunchBrowseProperty(e.target.value)}
+                    style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: launchBrowseProperty ? C.text : C.muted, outline: "none" }}>
+                    <option value="">Select property to browse…</option>
+                    {ALL_PROPERTIES.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                  <button onClick={() => { setBrowseMode(true); setCurrentVisitId(null); setViewingVisitId(null); setAppView("simd") }}
+                    disabled={!launchBrowseProperty}
+                    style={{ padding: "8px", fontSize: 11, fontWeight: 700, background: launchBrowseProperty ? C.cyan : C.card, color: launchBrowseProperty ? "#fff" : C.dim, border: `1px solid ${launchBrowseProperty ? C.cyan : C.border}`, borderRadius: 5, cursor: launchBrowseProperty ? "pointer" : "not-allowed" }}>
+                    Browse
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ── RIGHT: Recent visits ── */}
+          <div style={{ flex: "1 1 380px", maxWidth: 480, display: "flex", flexDirection: "column", gap: 0 }}>
+            <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${C.border}`, fontSize: 12, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: C.text }}>Recent visits</div>
+              {/* Filters */}
+              <div style={{ padding: "10px 20px", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 8 }}>
+                <select value={historyPersonFilter} onChange={e => setHistoryPersonFilter(e.target.value)}
+                  style={{ flex: 1, padding: "5px 8px", fontSize: 10.5, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none" }}>
+                  <option value="all">All people</option>
+                  {SITE_PERSONS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <select value={historyRangeFilter} onChange={e => setHistoryRangeFilter(e.target.value)}
+                  style={{ flex: 1, padding: "5px 8px", fontSize: 10.5, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none" }}>
+                  <option value="1">Today</option>
+                  <option value="7">Last 7 days</option>
+                  <option value="30">Last 30 days</option>
+                  <option value="90">Last 90 days</option>
+                  <option value="all">All</option>
+                </select>
+              </div>
+              {/* Visit rows */}
+              <div style={{ overflowY: "auto", maxHeight: 480 }}>
+                {historyVisible.length === 0 ? (
+                  <div style={{ padding: "32px 20px", textAlign: "center", fontSize: 11, color: C.dim, fontStyle: "italic" }}>
+                    No visits yet. Start one on the left and it will appear here.
+                  </div>
+                ) : (
+                  historyVisible.map(v => {
+                    const person = SITE_PERSONS.find(p => p.id === v.personId)
+                    const dur = v.endedAt ? fmtDuration(v.endedAt - v.startedAt) : ""
+                    const d = new Date(v.startedAt)
+                    const dateStr = d.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                    const isOffice = v.visitType === "Office Update"
+                    return (
+                      <div key={v.id}
+                        onClick={() => { setViewingVisitId(v.id); setBrowseMode(true); setCurrentVisitId(null); setShowVisitLog(true); setAppView("simd") }}
+                        style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, cursor: "pointer", display: "flex", gap: 14, transition: "background 0.1s" }}
+                        onMouseEnter={e => (e.currentTarget.style.background = C.card)}
+                        onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                        <div style={{ width: 40, flexShrink: 0 }}>
+                          <span style={{ fontSize: 10, color: C.dim, fontFamily: "JetBrains Mono" }}>{dateStr}</span>
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 1 }}>{v.property}</div>
+                          <div style={{ fontSize: 10.5, color: C.muted }}>{v.visitType} · {person?.name ?? "—"}</div>
+                          <div style={{ fontSize: 10, color: C.dim, fontFamily: "JetBrains Mono", marginTop: 2 }}>
+                            {v.log.length} log {v.log.length !== 1 ? "entries" : "entry"}
+                          </div>
+                          {v.reportStatus && (
+                            <div style={{ marginTop: 3 }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 3, background: v.reportStatus === "sent" ? "#D1FAE5" : v.reportStatus === "in review" ? "#FEF3C7" : C.card, color: v.reportStatus === "sent" ? "#065F46" : v.reportStatus === "in review" ? "#92400E" : C.muted, border: `1px solid ${v.reportStatus === "sent" ? "#6EE7B7" : v.reportStatus === "in review" ? "#FCD34D" : C.border}` }}>
+                                {v.reportStatus}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ flexShrink: 0, textAlign: "right" }}>
+                          {isOffice ? (
+                            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", padding: "2px 6px", borderRadius: 3, background: C.card, color: C.muted, border: `1px solid ${C.border}` }}>office</span>
+                          ) : dur ? (
+                            <span style={{ fontSize: 10, color: C.dim, fontFamily: "JetBrains Mono" }}>{dur}</span>
+                          ) : null}
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+                {historyFiltered.length > 5 && (
+                  <div style={{ padding: "12px 20px", textAlign: "center" }}>
+                    <button onClick={() => setHistoryShowAll(v => !v)}
+                      style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11, color: C.cyan, fontWeight: 600 }}>
+                      {historyShowAll ? "Show less" : `Show ${historyFiltered.length - 5} more`}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
-      style={{ height: "100dvh", display: "flex", overflow: "hidden", background: C.bg, color: C.text, fontFamily: "'DM Sans', sans-serif", userSelect: "none" }}
+      style={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden", background: C.bg, color: C.text, fontFamily: "'DM Sans', sans-serif", userSelect: "none" }}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onTouchMove={e => { const { clientX, clientY } = getTouchXY(e); handleMouseMove({ clientX, clientY } as React.MouseEvent) }}
       onTouchEnd={handleMouseUp}
     >
 
+      {/* ── SESSION STRIP ──────────────────────────────────────────────────────── */}
+      <div style={{ height: 44, flexShrink: 0, background: C.panel, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", paddingLeft: 14, paddingRight: 14, gap: 10, position: "relative", zIndex: 200 }}>
+        {browseMode ? (
+          /* BROWSE MODE strip */
+          <>
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", padding: "3px 8px", borderRadius: 4, background: C.cyan + "22", color: C.cyan, border: `1px solid ${C.cyan}55`, flexShrink: 0 }}>BROWSING</span>
+            {viewingVisit && (
+              <span style={{ fontSize: 11, color: C.dim, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {viewingVisit.property} · {viewingVisit.visitType}
+              </span>
+            )}
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+              <button onClick={() => { setAppView("launch"); setBrowseMode(false); setViewingVisitId(null); setShowVisitLog(false) }}
+                style={{ fontSize: 11, padding: "4px 10px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", color: C.muted }}>
+                Back
+              </button>
+              <button onClick={() => setAppView("launch")}
+                style={{ fontSize: 11, padding: "4px 10px", background: C.cyan, border: "none", borderRadius: 4, cursor: "pointer", color: "#fff", fontWeight: 600 }}>
+                Start a visit
+              </button>
+            </div>
+          </>
+        ) : currentVisit ? (
+          /* ACTIVE VISIT strip */
+          <>
+            {/* pulsing dot */}
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22C55E", flexShrink: 0, boxShadow: "0 0 0 3px #22C55E40" }} />
+            <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => setShowVisitLog(v => !v)}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentVisit.property}</span>
+                <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>· {currentVisit.visitType}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 10, color: C.dim, fontFamily: "JetBrains Mono" }}>{fmtElapsed(elapsed)}</span>
+                <span style={{ fontSize: 10, color: C.dim }}>· {currentVisit.log.length} changes</span>
+                <span style={{ fontSize: 9, color: C.dim }}>▾</span>
+              </div>
+            </div>
+            <div style={{ flexShrink: 0, fontSize: 11, color: C.dim, fontWeight: 500 }}>
+              {selectedPerson?.name ?? ""}
+            </div>
+            <button onClick={() => setShowCloseVisit(v => !v)}
+              style={{ flexShrink: 0, padding: "5px 12px", fontSize: 11, fontWeight: 700, background: "#EF4444", border: "none", borderRadius: 5, cursor: "pointer", color: "#fff", letterSpacing: "0.03em" }}>
+              Close visit
+            </button>
+          </>
+        ) : (
+          /* NO SESSION strip */
+          <>
+            <span style={{ fontSize: 11, color: C.dim, fontStyle: "italic" }}>No active visit</span>
+            <button onClick={() => setAppView("launch")}
+              style={{ marginLeft: "auto", fontSize: 11, padding: "5px 12px", background: C.cyan, border: "none", borderRadius: 5, cursor: "pointer", color: "#fff", fontWeight: 600 }}>
+              Start a visit
+            </button>
+          </>
+        )}
+
+        {/* ── VISIT LOG DROPDOWN ── */}
+        {showVisitLog && (currentVisit || viewingVisit) && (() => {
+          const logVisit = viewingVisit ?? currentVisit!
+          return (
+            <div style={{ position: "absolute", top: 44, left: 14, width: 440, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 8px 32px #0008", zIndex: 300, display: "flex", flexDirection: "column", maxHeight: 480, overflow: "hidden" }}>
+              <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{logVisit.property}</div>
+                  <div style={{ fontSize: 10, color: C.muted }}>{logVisit.visitType} · {SITE_PERSONS.find(p => p.id === logVisit.personId)?.name ?? "—"}</div>
+                </div>
+                <button onClick={() => setShowVisitLog(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: C.muted, padding: 4 }}>✕</button>
+              </div>
+              <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
+                {logVisit.log.slice().reverse().map((entry, i) => {
+                  const isNew = i === 0 && visitLogHighlight && logVisit.id === currentVisitId
+                  return (
+                    <div key={entry.id} style={{ padding: "8px 16px", display: "flex", gap: 10, alignItems: "flex-start", background: isNew ? C.cyan + "18" : "transparent", transition: "background 0.4s" }}>
+                      <span style={{ fontSize: 9.5, color: C.dim, fontFamily: "JetBrains Mono", flexShrink: 0, paddingTop: 1 }}>
+                        {new Date(entry.at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                      </span>
+                      <span style={{ fontSize: 11, color: C.text, lineHeight: 1.5 }}>{entry.text}</span>
+                    </div>
+                  )
+                })}
+              </div>
+              {logVisit.id === currentVisitId && (
+                <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 16px" }}>
+                  <button disabled style={{ width: "100%", padding: "8px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.dim, cursor: "not-allowed" }}>
+                    Add work performed (coming soon)
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })()}
+
+        {/* ── CLOSE VISIT POPOVER ── */}
+        {showCloseVisit && currentVisit && (() => {
+          const outstanding: string[] = []
+          const assetCount = currentVisit.log.filter(l => l.recordType === "asset").length
+          const pipeCount = currentVisit.log.filter(l => l.recordType === "pipe").length
+          return (
+            <div style={{ position: "absolute", top: 44, right: 14, width: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 8px 32px #0008", zIndex: 300, display: "flex", flexDirection: "column" }}>
+              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>Close visit</div>
+                <button onClick={() => setShowCloseVisit(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: C.muted, padding: 4 }}>✕</button>
+              </div>
+              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>{currentVisit.property} · {currentVisit.visitType}</div>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <span style={{ fontSize: 11, color: C.muted }}><strong style={{ color: C.text }}>{currentVisit.log.length}</strong> log entries</span>
+                  {assetCount > 0 && <span style={{ fontSize: 11, color: C.muted }}><strong style={{ color: C.text }}>{assetCount}</strong> assets</span>}
+                  {pipeCount > 0 && <span style={{ fontSize: 11, color: C.muted }}><strong style={{ color: C.text }}>{pipeCount}</strong> pipes</span>}
+                </div>
+              </div>
+              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>Visit note (optional)</div>
+                <textarea value={closeVisitNote} onChange={e => setCloseVisitNote(e.target.value)} rows={3}
+                  placeholder="Notes about this visit…"
+                  style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
+              </div>
+              <div style={{ padding: "14px 18px", display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setShowCloseVisit(false)}
+                  style={{ padding: "8px 16px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer", color: C.muted }}>
+                  Cancel
+                </button>
+                <button onClick={closeVisit}
+                  style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, background: "#EF4444", border: "none", borderRadius: 5, cursor: "pointer", color: "#fff" }}>
+                  Close visit
+                </button>
+              </div>
+            </div>
+          )
+        })()}
+      </div>
+
+      {/* ── 3-COLUMN ROW WRAPPER ───────────────────────────────────────────────── */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden", pointerEvents: browseMode ? "none" : "auto" }}>
+
       {/* ── LEFT PANEL ─────────────────────────────────────────────────────────── */}
+      {/* Rail shown when collapsed */}
+      {!leftPanelOpen && (
+        <div style={{ width: 20, minWidth: 20, background: C.panel, borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 12, pointerEvents: "auto" }}>
+          <button onClick={() => setLeftPanelOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted, fontSize: 11, padding: 4, lineHeight: 1 }}>›</button>
+        </div>
+      )}
       <div style={{ width: leftPanelOpen ? 252 : 0, minWidth: leftPanelOpen ? 252 : 0, background: C.panel, borderRight: leftPanelOpen ? `1px solid ${C.border}` : "none", display: "flex", flexDirection: "column", overflow: "hidden", transition: "width 0.22s cubic-bezier(0.4,0,0.2,1), min-width 0.22s cubic-bezier(0.4,0,0.2,1)" }}>
 
         {/* Logo */}
         <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3, justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
               <circle cx="11" cy="11" r="10" stroke={C.cyan} strokeWidth="1.5" />
               <circle cx="11" cy="11" r="6" stroke={C.cyan} strokeWidth="0.8" strokeDasharray="3 2" opacity="0.5" />
@@ -1824,6 +2471,8 @@ export default function App() {
               <line x1="17" y1="11" x2="21" y2="11" stroke={C.cyan} strokeWidth="1.2" strokeLinecap="round" />
             </svg>
             <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", letterSpacing: "0.06em", textTransform: "uppercase" }}>SewerMap Pro</span>
+          </div>
+          <button onClick={() => setLeftPanelOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted, fontSize: 11, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>‹</button>
           </div>
           <div style={{ fontSize: 9, color: C.blue, fontFamily: "JetBrains Mono", letterSpacing: "0.1em" }}>UNDERGROUND INFRASTRUCTURE</div>
         </div>
@@ -1994,6 +2643,49 @@ export default function App() {
                     {needsAttention && !analysisComplete && (
                       <div title="Needs attention" style={{ flexShrink: 0, width: 16, height: 16, borderRadius: "50%", background: "#A96B00", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff", fontFamily: "JetBrains Mono" }}>!</div>
                     )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* ── VISITS section ── */}
+        <div style={{ borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0, flex: leftSectionOpen.visits ? "0 0 auto" : undefined, maxHeight: leftSectionOpen.visits ? 260 : undefined }}>
+          <button
+            onClick={() => setLeftSectionOpen(s => ({ ...s, visits: !s.visits }))}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 16px", background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", cursor: "pointer", flexShrink: 0 }}
+          >
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Visits ({visits.length})</span>
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" style={{ transform: leftSectionOpen.visits ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.15s" }}>
+              <path d="M2 4l4 4 4-4" stroke={C.muted} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          {leftSectionOpen.visits && (
+            <div style={{ overflowY: "auto", flex: 1 }}>
+              {currentVisit && (
+                <div onClick={() => { setShowVisitLog(v => !v); setViewingVisitId(null) }}
+                  style={{ padding: "7px 16px", cursor: "pointer", background: "#22C55E0F", borderLeft: `2px solid #22C55E`, display: "flex", alignItems: "center", gap: 8, transition: "background 0.1s" }}>
+                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#22C55E", flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentVisit.property}</div>
+                    <div style={{ fontSize: 9.5, color: C.muted }}>{currentVisit.visitType} · active · {currentVisit.log.length} entries</div>
+                  </div>
+                </div>
+              )}
+              {visits.filter(v => v.endedAt !== null).map(v => {
+                const person = SITE_PERSONS.find(p => p.id === v.personId)
+                const d = new Date(v.startedAt)
+                return (
+                  <div key={v.id}
+                    onClick={() => { setViewingVisitId(v.id); setShowVisitLog(true) }}
+                    style={{ padding: "6px 16px", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, transition: "background 0.1s" }}
+                    onMouseEnter={e => (e.currentTarget.style.background = C.card)}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11, fontWeight: 500, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.property}</div>
+                      <div style={{ fontSize: 9.5, color: C.muted }}>{d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} · {person?.name ?? "—"}</div>
+                    </div>
                   </div>
                 )
               })}
@@ -2853,21 +3545,6 @@ export default function App() {
 
           </div> {/* end tab-level zoom wrapper */}
           </div> {/* end interactive pan/zoom wrapper */}
-
-          {/* Left panel toggle */}
-          <button
-            onClick={() => setLeftPanelOpen(v => !v)}
-            title={leftPanelOpen ? "Collapse left panel" : "Expand left panel"}
-            style={{
-              position: "absolute", top: "50%", left: 0, transform: "translateY(-50%)",
-              width: 18, height: 48, display: "flex", alignItems: "center", justifyContent: "center",
-              background: C.panel, borderTop: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, borderLeft: "none",
-              borderRadius: "0 6px 6px 0", cursor: "pointer", zIndex: 20, padding: 0,
-              color: C.muted, fontSize: 10,
-            }}
-          >
-            {leftPanelOpen ? "‹" : "›"}
-          </button>
 
           {/* Right panel toggle */}
           <button
@@ -5214,6 +5891,7 @@ export default function App() {
           </div>
         </div>
       )}
+      </div>{/* end 3-col row wrapper */}
     </div>
   )
 }
