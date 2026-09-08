@@ -98,16 +98,49 @@ interface Pipe {
   videos: CamVideo[]
 }
 
+interface CharRow {
+  id: string
+  isStart?: boolean
+  isEnd?: boolean
+  length: string
+  depth: string
+  aboveGround: string
+  unitNumbers?: string
+  ownership: string
+  images?: string[]
+}
+
 interface CamVideo {
   id: string
   name: string
   date: string
   operator: string
+  // Step 1 — Set up
+  purpose?: string
+  launchedFrom?: string
   direction: "upstream" | "downstream"
+  zeroRef?: string
+  entryPipeSize?: string
+  entryPipeType?: string
+  entryDepth?: string
+  // Step 3 — Why stopped
+  whyStopped?: string
+  stopFootage?: string
+  stopNotes?: string
+  // Step 5 — Analysis
   observationsClosed: boolean
+  observations: Observation[]
+  // Step 6 — Fully inspected
+  fullyInspected?: "Yes" | "Partially" | "No"
+  notFullyReason?: string
+  assessableFootage?: string
+  // Step 7 — Characteristics
+  characteristics?: CharRow[]
+  // Stepper progress (1–8; 8 = complete)
+  inspStep: number
+  // Legacy run start/end
   runStart?: { footage: string; depth: string; pipeType: string; pipeSize: string }
   runEnd?: { footage: string; depth: string; pipeType: string; pipeSize: string }
-  observations: Observation[]
 }
 
 interface Observation {
@@ -139,6 +172,15 @@ interface Observation {
   pipeSize?: string
   // Common
   notes?: string
+  // CIPP concern
+  cippConcern?: boolean
+  cippLocked?: boolean
+  cippLockedReason?: string
+  cippDepth?: string
+  cippLocateClose?: boolean
+  cippLocateWide?: boolean
+  cippAboveGround?: string
+  cippNotes?: string
 }
 
 // ── Asset type metadata ────────────────────────────────────────────────────────
@@ -191,6 +233,9 @@ const SAMPLE_PIPES: Pipe[] = [
     videos: [{
       id: "v1", name: "PIPE-001_DS_2024-03-15.mp4", date: "2024-03-15",
       operator: "J. Martinez", direction: "downstream",
+      inspStep: 5, purpose: "Initial inspection", launchedFrom: "CF-01", zeroRef: "At the pipe entry",
+      entryPipeSize: '6"', entryPipeType: "Cast iron", entryDepth: "6.5",
+      whyStopped: "Reached the next pipe or structure", stopFootage: "127",
       observationsClosed: false,
       runStart: { footage: "0", depth: "6.5", pipeType: "Cast iron", pipeSize: '6"' },
       observations: [
@@ -269,6 +314,58 @@ const DIRECTION_WAYS = ["Left turn", "Right turn", "Drop", "Elevation change"]
 const DIRECTION_FITTINGS = ["90°", "45°", "22.5°", "Sweep / long-turn 90°", "Unknown"]
 const PIPE_TYPES = ["Cast iron", "Clay", "PVC", "ABS", "Orangeburg", "Concrete", "Ductile iron", "Transite", "Unknown"]
 const PIPE_SIZES = ['2"', '3"', '4"', '6"', '8"', '10"', '12"', '15"', '18"']
+
+const PURPOSE_OPTIONS = ["Initial inspection", "Re-inspection", "Post-cleaning", "Post-repair verification", "Reserve study", "Warranty check", "Second opinion"]
+const ZERO_REF_OPTIONS = ["At the pipe entry", "At the cap", "At grade", "At the fitting"]
+const WHY_STOPPED_OPTIONS = [
+  "Reached the next pipe or structure",
+  "Reached a connection to the city main",
+  "Reached another accessible clean-out",
+  "Reached a basin or manhole",
+  "Reached a 90° fitting — end of the pipe",
+  "Reached a septic tank or lift station",
+  "Camera reel maxed out",
+  "Blocked — roots",
+  "Blocked — grease",
+  "Blocked — scale or hard deposits",
+  "Blocked — debris or foreign object",
+  "Suspected collapse",
+  "Offset or separated joint the head won't pass",
+  "Hard bend the head won't pass",
+  "Standing water — nothing visible",
+  "Pipe too small for the head",
+  "Other",
+]
+const NOT_FULLY_REASON_OPTIONS = [
+  "Camera did not reach the end",
+  "Heavy grease obscured the view",
+  "Standing water obscured the view",
+  "Sediment or debris obscured the view",
+  "Scale obscured the view",
+  "Camera lens fouled",
+  "Poor lighting or image quality",
+  "Section skipped — could not hold position",
+  "Other",
+]
+const ABOVE_GROUND_OPTIONS = [
+  "Hallway", "Lobby or finished space", "Living Space(s)", "Basement", "Storage units",
+  "Laundry room", "Mechanical room", "Crawlspace", "Garage or parking deck",
+  "Building slab — common area", "Under mechanical equipment",
+  "Front yard — grass", "Landscaping", "Courtyard", "Walkway",
+  "Parking lot", "Driveway", "Gravel",
+  "Sidewalk", "City street", "Alley",
+  "Front Gate", "Property Sidewalk", "Entrance",
+  "Unknown",
+]
+const MUNICIPAL_SURFACES = ["Sidewalk", "City street", "Alley"]
+
+function ownershipFor(ag: string): string {
+  if (MUNICIPAL_SURFACES.includes(ag)) return "Municipal"
+  if (ag === "Living Space(s)") return "Individual unit"
+  return "Association"
+}
+
+const STEP_TITLES = ["", "Set up", "Push", "Why the camera stopped", "Upload the recording", "Sewer camera analysis", "Was the pipe fully inspected?", "Characteristics"]
 
 // ── Asset icons ────────────────────────────────────────────────────────────────
 
@@ -391,6 +488,240 @@ const inputSt: React.CSSProperties = {
   borderRadius: 4, color: "#16202A",
   fontSize: 11, fontFamily: "JetBrains Mono", outline: "none", boxSizing: "border-box",
 }
+
+// ── Pipe profile graphic ───────────────────────────────────────────────────────
+
+const PROFILE_MUNICIPAL = ["Sidewalk", "City street", "Alley", "Property Sidewalk"]
+const PROFILE_FINISHED  = ["Hallway", "Lobby or finished space", "Living Space(s)", "Laundry room", "Mechanical room", "Crawlspace", "Garage or parking deck", "Building slab — common area", "Under mechanical equipment"]
+
+function profileSurfaceStyle(ag: string) {
+  if (PROFILE_MUNICIPAL.includes(ag)) return { fill: "#FBE3EF", stroke: "#CE1A74", sw: 1.5, tf: "#8A1150", fw: "600" }
+  if (PROFILE_FINISHED.includes(ag))  return { fill: "#FCEFD8", stroke: "#D2DAE2", sw: 1, tf: "#16202A", fw: "400" }
+  return { fill: "#EDF1F4", stroke: "#D2DAE2", sw: 1, tf: "#16202A", fw: "400" }
+}
+
+function profileDefStyle(sev: number) {
+  if (sev >= 5) return { stem: "#CE1A74", fill: "#FBE3EF", stroke: "#CE1A74", tf: "#8A1150", lbl: "Critical" }
+  if (sev >= 4) return { stem: "#FF7A29", fill: "#FDEEE2", stroke: "#FF7A29", tf: "#8A4A12", lbl: "Severe"   }
+  return           { stem: "#A96B00", fill: "#FFF8F0", stroke: "#A96B00", tf: "#7A4E00", lbl: "Moderate" }
+}
+
+function PipeProfileSVG({ video, pipe, onClickObs }: {
+  video: CamVideo
+  pipe: Pipe
+  onClickObs?: (obsId: string) => void
+}) {
+  const X0 = 70, X1 = 880, AW = 810
+  const totalFt = Math.max(1, parseFloat(video.stopFootage || "0"))
+  const ftToX = (ft: number) => X0 + (ft / totalFt) * AW
+
+  const chars = video.characteristics ?? []
+  const hasChars = chars.length >= 2
+
+  // ── Surface bands ──
+  const rawBands: { startFt: number; endFt: number; ag: string }[] = []
+  if (hasChars) {
+    for (let i = 0; i < chars.length - 1; i++) {
+      rawBands.push({ startFt: parseFloat(chars[i].length) || 0, endFt: parseFloat(chars[i + 1].length) || totalFt, ag: chars[i].aboveGround })
+    }
+    const last = chars[chars.length - 1]
+    if (parseFloat(last.length) < totalFt) rawBands.push({ startFt: parseFloat(last.length) || totalFt, endFt: totalFt, ag: last.aboveGround })
+  }
+  const bands: typeof rawBands = []
+  for (const b of rawBands) {
+    const prev = bands[bands.length - 1]
+    if (prev && prev.ag === b.ag) prev.endFt = b.endFt
+    else bands.push({ ...b })
+  }
+
+  // ── Depth profile ──
+  const depthPts = chars.map(r => ({ ft: parseFloat(r.length) || 0, d: parseFloat(r.depth) || 0 })).filter(p => p.d > 0)
+  const DTOP = 100, DBOT = 145
+  const allD = depthPts.map(p => p.d)
+  const minD = allD.length ? Math.min(...allD) * 0.98 : 0
+  const maxD = allD.length ? Math.max(...allD) * 1.02 : 10
+  const dToY = (d: number) => maxD === minD ? DBOT : DTOP + ((d - minD) / (maxD - minD)) * (DBOT - DTOP)
+  const dXY = depthPts.map(p => ({ x: ftToX(p.ft), y: dToY(p.d), d: p.d }))
+
+  // ── Material sections ──
+  const pipeTrans = video.observations.filter(o => o.type === "pipe-transition")
+    .sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
+  const matSecs: { s: number; e: number; type: string; size: string }[] = []
+  let mType = video.entryPipeType || pipe.start?.type || ""
+  let mSize = video.entryPipeSize || pipe.start?.diameter || ""
+  let mStart = 0
+  for (const tr of pipeTrans) {
+    const ft = parseFloat(tr.footage || "0")
+    matSecs.push({ s: mStart, e: ft, type: mType, size: mSize })
+    mType = String(tr.pipeType ?? mType)
+    mSize = String(tr.pipeSize ?? mSize)
+    mStart = ft
+  }
+  matSecs.push({ s: mStart, e: totalFt, type: mType, size: mSize })
+
+  // ── Observations ──
+  const tieIns = video.observations.filter(o => o.type === "tie-in")
+    .sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
+  const defects = video.observations.filter(o => o.type === "defect")
+    .sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
+
+  // Stagger defects
+  const BW = 92, BH = 30, ROW_A = 262, ROW_B = 304
+  const staggered: { obs: typeof defects[0]; row: "A" | "B"; x: number }[] = []
+  for (const obs of defects) {
+    const x = ftToX(parseFloat(obs.footage || "0"))
+    const lastA = staggered.filter(s => s.row === "A").slice(-1)[0]
+    const lastB = staggered.filter(s => s.row === "B").slice(-1)[0]
+    const okA = !lastA || Math.abs(x - lastA.x) >= BW + 6
+    const okB = !lastB || Math.abs(x - lastB.x) >= BW + 6
+    staggered.push({ obs, row: okA ? "A" : okB ? "B" : "A", x })
+  }
+
+  // Axis ticks
+  const interval = totalFt <= 50 ? 10 : totalFt <= 150 ? 20 : totalFt <= 300 ? 50 : 100
+  const ticks: number[] = []
+  for (let t = 0; t <= totalFt; t += interval) ticks.push(t)
+  if (!ticks.includes(totalFt)) ticks.push(totalFt)
+
+  const hasCipp = staggered.some(s => s.obs.cippConcern)
+  const assessFt = video.fullyInspected !== "Yes" && video.assessableFootage ? parseFloat(video.assessableFootage) : null
+
+  return (
+    <svg viewBox="0 0 940 440" width="100%" style={{ display: "block", fontFamily: "system-ui, sans-serif" }}>
+
+      {/* LANE 1 — ABOVE */}
+      <text x="48" y="62" fontSize="11" fill="#5F6E7C" textAnchor="end">ABOVE</text>
+      {hasChars ? bands.map((b, i) => {
+        const bx = ftToX(b.startFt), bw = Math.max(0, ftToX(b.endFt) - bx)
+        const st = profileSurfaceStyle(b.ag)
+        return (
+          <g key={i}>
+            <rect x={bx} y={48} width={bw} height={26} fill={st.fill} stroke={st.stroke} strokeWidth={st.sw} />
+            {bw > 50 && <text x={bx + bw / 2} y={65} fontSize="11" fill={st.tf} textAnchor="middle" fontWeight={st.fw}
+              clipPath={`url(#clip-zone-${i})`}>{b.ag}</text>}
+            <clipPath id={`clip-zone-${i}`}><rect x={bx + 2} y={46} width={bw - 4} height={30} /></clipPath>
+          </g>
+        )
+      }) : <rect x={X0} y={48} width={AW} height={26} fill="#F1F5F9" stroke="#D2DAE2" strokeDasharray="4 3" />}
+
+      {hasChars && bands.slice(0, -1).map((b, i) => {
+        const bx = ftToX(b.endFt)
+        const mu = PROFILE_MUNICIPAL.includes(bands[i + 1]?.ag ?? "")
+        return (
+          <g key={i}>
+            <line x1={bx} y1={48} x2={bx} y2={182} stroke={mu ? "#CE1A74" : "#D2DAE2"} strokeDasharray="3 3" opacity={mu ? 0.6 : 1} />
+            <text x={bx + 3} y={86} fontSize="11" fill={mu ? "#8A1150" : "#5F6E7C"} fontFamily="monospace">{Math.round(b.endFt)}</text>
+          </g>
+        )
+      })}
+
+      {/* LANE 2 — DEPTH */}
+      <text x="68" y="112" fontSize="11" fill="#5F6E7C" textAnchor="end">DEPTH</text>
+      {hasChars && dXY.length >= 2 ? (
+        <>
+          <path d={`M${dXY[0].x} ${dXY[0].y} ${dXY.slice(1).map(p => `L${p.x} ${p.y}`).join(" ")} L${dXY[dXY.length - 1].x} ${DBOT} L${dXY[0].x} ${DBOT} Z`} fill="#EDF1F4" />
+          <path d={`M${dXY[0].x} ${dXY[0].y} ${dXY.slice(1).map(p => `L${p.x} ${p.y}`).join(" ")}`} fill="none" stroke="#5F6E7C" strokeWidth="1.6" />
+          {dXY.map((p, i) => (
+            <g key={i}>
+              <circle cx={p.x} cy={p.y} r="3" fill="#38424E" />
+              <text x={p.x} y={p.y - 5} fontSize="11" fill="#38424E" textAnchor="middle" fontFamily="monospace">{p.d.toFixed(1)}</text>
+            </g>
+          ))}
+        </>
+      ) : (
+        <text x={X0 + AW / 2} y={128} fontSize="11" fill="#94A3B8" textAnchor="middle" fontStyle="italic">Not recorded</text>
+      )}
+
+      {/* LANE 3 — PIPE */}
+      <text x="68" y="174" fontSize="11" fill="#5F6E7C" textAnchor="end">PIPE</text>
+      {matSecs.map((sec, i) => {
+        const sx = ftToX(sec.s), sw = Math.max(0, ftToX(sec.e) - sx)
+        const lined = /cipp|lined/i.test(sec.type)
+        return (
+          <g key={i}>
+            <rect x={sx} y={158} width={sw} height={24} fill={lined ? "#00803E" : "#C6CFD8"} />
+            {sw > 60 && <text x={sx + sw / 2} y={174} fontSize="11" fill={lined ? "#FFFFFF" : "#16202A"} textAnchor="middle" fontWeight={lined ? "600" : "400"}>{sec.type}{sec.size ? ` · ${sec.size}` : ""}</text>}
+          </g>
+        )
+      })}
+      {/* Access point start */}
+      <circle cx={X0} cy={170} r="9" fill="#FFFFFF" stroke="#1F2933" strokeWidth="2.5" />
+      <rect x={X0 - 4} y={166} width={8} height={8} fill="#1F2933" />
+      <text x={X0} y={200} fontSize="11" fill="#16202A" textAnchor="middle" fontWeight="600">{pipe.fromId || "—"}</text>
+      {/* Access point end */}
+      <rect x={X1 - 9} y={161} width={18} height={18} rx="2" fill="#38424E" stroke="#FFFFFF" strokeWidth="1.5" />
+      <text x={X1} y={200} fontSize="11" fill="#16202A" textAnchor="middle" fontWeight="600">{pipe.toId || "—"}</text>
+      {/* Flow arrow */}
+      <line x1={X1 + 4} y1={170} x2={X1 + 14} y2={170} stroke="#16202A" strokeWidth="2" />
+      <path d={`M${X1 + 18} 170 l-10 -5 v10 z`} fill="#16202A" />
+
+      {/* Partial dashed overlay */}
+      {assessFt !== null && assessFt < totalFt && (
+        <>
+          <rect x={ftToX(assessFt)} y={48} width={ftToX(totalFt) - ftToX(assessFt)} height={26} fill="rgba(248,250,252,0.75)" stroke="#D2DAE2" strokeDasharray="4 3" />
+          <rect x={ftToX(assessFt)} y={158} width={ftToX(totalFt) - ftToX(assessFt)} height={24} fill="rgba(198,207,216,0.35)" stroke="#D2DAE2" strokeDasharray="4 3" />
+          <text x={(ftToX(assessFt) + X1) / 2} y={172} fontSize="10" fill="#94A3B8" textAnchor="middle">? ft</text>
+        </>
+      )}
+
+      {/* LANE 4 — TIE-INS */}
+      <text x="68" y="222" fontSize="11" fill="#5F6E7C" textAnchor="end">TIE-INS</text>
+      {tieIns.map(obs => {
+        const tx = ftToX(parseFloat(obs.footage || "0"))
+        const clock = obs.tieOrientation?.[0] != null ? ` · ${obs.tieOrientation[0]} o'clock` : ""
+        return (
+          <g key={obs.id} onClick={() => onClickObs?.(obs.id)} style={{ cursor: onClickObs ? "pointer" : "default" }}>
+            <line x1={tx} y1={182} x2={tx} y2={214} stroke="#1B6FB8" strokeWidth="2" />
+            <circle cx={tx} cy={216} r="4" fill="#1B6FB8" />
+            <text x={tx} y={238} fontSize="11" fill="#1B6FB8" textAnchor="middle">{obs.footage ? fmtFtIn(obs.footage) : "—"}{clock}</text>
+          </g>
+        )
+      })}
+
+      {/* LANE 5 — DEFECTS */}
+      <text x="68" y="272" fontSize="11" fill="#5F6E7C" textAnchor="end">DEFECTS</text>
+      {staggered.map(({ obs, row, x: dx }) => {
+        const st = profileDefStyle(obs.severity || 1)
+        const ry = row === "A" ? ROW_A : ROW_B
+        return (
+          <g key={obs.id} onClick={() => onClickObs?.(obs.id)} style={{ cursor: onClickObs ? "pointer" : "default" }}>
+            <line x1={dx} y1={182} x2={dx} y2={ry} stroke={st.stem} strokeWidth="2.5" />
+            <rect x={dx - BW / 2} y={ry} width={BW} height={BH} rx="4" fill={st.fill} stroke={st.stroke} />
+            <text x={dx} y={ry + 13} fontSize="11" fill={st.tf} textAnchor="middle" fontWeight="600">{obs.defectSubtype || "Defect"}</text>
+            <text x={dx} y={ry + 26} fontSize="11" fill={st.tf} textAnchor="middle" fontFamily="monospace">{obs.footage ? fmtFtIn(obs.footage) : "—"}</text>
+            {obs.cippConcern && <circle cx={dx + BW / 2 - 7} cy={ry + 7} r="4" fill="#CE1A74" />}
+          </g>
+        )
+      })}
+
+      {/* LANE 6 — AXIS */}
+      <line x1={X0} y1={366} x2={X1} y2={366} stroke="#D2DAE2" />
+      {ticks.map(t => {
+        const tx = ftToX(t)
+        const isLast = t === Math.round(totalFt) || (ticks.indexOf(t) === ticks.length - 1)
+        return (
+          <g key={t}>
+            <line x1={tx} y1={362} x2={tx} y2={370} stroke="#D2DAE2" />
+            <text x={tx} y={384} fontSize="11" fill={isLast ? "#16202A" : "#5F6E7C"} fontFamily="monospace" textAnchor="middle">{isLast ? `${Math.round(totalFt)} ft` : String(t)}</text>
+          </g>
+        )
+      })}
+
+      {/* Legend */}
+      <g fontSize="11" fill="#5F6E7C">
+        <rect x={70} y={404} width={12} height={12} fill="#00803E" /><text x={88} y={414}>Lined</text>
+        <rect x={138} y={404} width={12} height={12} fill="#C6CFD8" /><text x={156} y={414}>Original</text>
+        <circle cx={224} cy={410} r={5} fill="#1B6FB8" /><text x={235} y={414}>Tie-in</text>
+        <rect x={289} y={404} width={12} height={12} fill="#FF7A29" /><text x={307} y={414}>Severe</text>
+        <rect x={362} y={404} width={12} height={12} fill="#CE1A74" /><text x={380} y={414}>Critical</text>
+        <rect x={440} y={404} width={12} height={12} fill="#FBE3EF" stroke="#CE1A74" /><text x={458} y={414}>Municipal</text>
+        {hasCipp && <><circle cx={535} cy={410} r={4} fill="#CE1A74" /><text x={545} y={414}>CIPP concern</text></>}
+      </g>
+    </svg>
+  )
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
 
 function FieldLabel({ text, pricing }: { text: string; pricing?: boolean }) {
   return (
@@ -729,6 +1060,8 @@ export default function App() {
   const [editViewName, setEditViewName] = useState("")
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null)
   const [activeTabId, setActiveTabId] = useState<"main" | string>("main")
+  const [pipePanelW, setPipePanelW] = useState(840)
+  const pipeDragRef = useRef<{ startX: number; startW: number } | null>(null)
   const [editingPipe, setEditingPipe] = useState(false)
   const [pipeForm, setPipeForm] = useState<{
     start: PipeEndpoint
@@ -748,6 +1081,13 @@ export default function App() {
   const [inspectionFullscreen, setInspectionFullscreen] = useState(false)
   const [assetVideoSource, setAssetVideoSource] = useState<{ assetId: string; videoId: string } | null>(null)
   const [incompletePipeIds, setIncompletePipeIds] = useState<Set<string>>(new Set())
+  // Stepper state
+  const [editingStep, setEditingStep] = useState<number | null>(null)
+  const [step1Form, setStep1Form] = useState({ purpose: "", launchedFrom: "", direction: "downstream" as "upstream"|"downstream", zeroRef: "At the pipe entry", entryPipeSize: "", entryPipeType: "", entryDepth: "" })
+  const [step3Form, setStep3Form] = useState({ whyStopped: "", stopFootage: "0", stopNotes: "" })
+  const [step6Form, setStep6Form] = useState({ fullyInspected: "" as "Yes"|"Partially"|"No"|"", notFullyReason: "", assessableFootage: "0" })
+  const [step7Rows, setStep7Rows] = useState<CharRow[]>([])
+  const [charRowEditing, setCharRowEditing] = useState<string | null>(null)
 
   const mapRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -876,6 +1216,26 @@ export default function App() {
     setMapZoom(z)
     setMapPan({ x: -((activeView.x + activeView.w / 2) * SCALE - 2000) * z / VW, y: -((activeView.y + activeView.h / 2) * SCALE - 2000) * z / VH })
   }, [activeTabId])
+
+  // Initialise stepper forms when a video is selected
+  useEffect(() => {
+    if (!selectedVideoId || !selectedPipeId) return
+    const vid = pipes.find(p => p.id === selectedPipeId)?.videos.find(v => v.id === selectedVideoId)
+    if (!vid) return
+    setStep1Form({ purpose: vid.purpose ?? "", launchedFrom: vid.launchedFrom ?? "", direction: vid.direction, zeroRef: vid.zeroRef ?? "At the pipe entry", entryPipeSize: vid.entryPipeSize ?? "", entryPipeType: vid.entryPipeType ?? "", entryDepth: vid.entryDepth ?? "" })
+    setStep3Form({ whyStopped: vid.whyStopped ?? "", stopFootage: vid.stopFootage ?? "0", stopNotes: vid.stopNotes ?? "" })
+    setStep6Form({ fullyInspected: (vid.fullyInspected ?? "") as "Yes"|"Partially"|"No"|"", notFullyReason: vid.notFullyReason ?? "", assessableFootage: vid.assessableFootage ?? "0" })
+    const chars = vid.characteristics
+    if (chars && chars.length > 0) {
+      setStep7Rows(chars)
+    } else {
+      setStep7Rows([
+        { id: "start", isStart: true, length: "0", depth: vid.entryDepth ?? "", aboveGround: "", ownership: "Association" },
+        { id: "end", isEnd: true, length: vid.stopFootage ?? "", depth: "", aboveGround: "", ownership: "Association" },
+      ])
+    }
+    setEditingStep(null)
+  }, [selectedVideoId])
 
   const applyZoomStep = (direction: 1 | -1) => {
     setMapZoom(z => {
@@ -1139,6 +1499,7 @@ export default function App() {
     const vid: CamVideo = {
       id: `v${Date.now()}`, name, date: new Date().toISOString().slice(0, 10),
       operator: "", direction: "downstream", observationsClosed: false, observations: [],
+      inspStep: 1, zeroRef: "At the pipe entry",
     }
     return vid
   }
@@ -1161,6 +1522,15 @@ export default function App() {
     setVideoPlaying(false)
     setShowVideoForm(false)
     setVideoForm({ name: "", date: "", operator: "", direction: "downstream" })
+  }
+
+  const updateVideo = (fields: Partial<CamVideo>) => {
+    if (!selectedPipeId || !selectedVideoId) return
+    setPipes(prev => prev.map(p =>
+      p.id === selectedPipeId
+        ? { ...p, videos: p.videos.map(v => v.id === selectedVideoId ? { ...v, ...fields } : v) }
+        : p
+    ))
   }
 
   const saveObservation = () => {
@@ -1404,7 +1774,7 @@ export default function App() {
 
   const panelOpen = !!(selectedAssetId || selectedPipeId || selectedViewId)
   const panelW = panelOpen ? (selectedVideo ? 540 : 364) : 0
-  const effectivePanelW = (panelOpen && rightPanelOpen) ? (selectedVideo ? 540 : 364) : 0
+  const effectivePanelW = (panelOpen && rightPanelOpen) ? (selectedPipeId ? pipePanelW : selectedVideo ? 540 : 364) : 0
 
   return (
     <div
@@ -2526,7 +2896,27 @@ export default function App() {
       </div>
 
       {/* ── RIGHT PANEL ───────────────────────────────────────────────────────── */}
-      <div style={{ width: effectivePanelW, minWidth: effectivePanelW, background: C.panel, borderLeft: (panelOpen && rightPanelOpen) ? `1px solid ${C.border}` : "none", display: "flex", flexDirection: "column", overflow: "hidden", transition: "width 0.25s cubic-bezier(0.4,0,0.2,1), min-width 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
+      <div style={{ width: effectivePanelW, minWidth: effectivePanelW, background: C.panel, borderLeft: (panelOpen && rightPanelOpen) ? `1px solid ${C.border}` : "none", display: "flex", flexDirection: "row", overflow: "hidden", transition: pipeDragRef.current ? "none" : "width 0.25s cubic-bezier(0.4,0,0.2,1), min-width 0.25s cubic-bezier(0.4,0,0.2,1)", position: "relative" }}>
+        {/* Drag handle — only when a pipe is open */}
+        {selectedPipeId && (
+          <div
+            onMouseDown={e => {
+              pipeDragRef.current = { startX: e.clientX, startW: pipePanelW }
+              const onMove = (me: MouseEvent) => {
+                if (!pipeDragRef.current) return
+                const delta = pipeDragRef.current.startX - me.clientX
+                setPipePanelW(Math.max(500, Math.min(1400, pipeDragRef.current.startW + delta)))
+              }
+              const onUp = () => { pipeDragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp) }
+              window.addEventListener("mousemove", onMove)
+              window.addEventListener("mouseup", onUp)
+            }}
+            style={{ width: 5, flexShrink: 0, cursor: "col-resize", background: "transparent", borderRight: `1px solid ${C.border}`, transition: "background 0.1s" }}
+            onMouseEnter={e => (e.currentTarget.style.background = C.cyan + "33")}
+            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+          />
+        )}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
         {/* Empty state */}
         {!selectedAssetId && !selectedPipeId && !selectedViewId && (
@@ -3011,10 +3401,20 @@ export default function App() {
               </div>
             </Section>
 
-            {/* Characteristics */}
+            {/* Pipe Overview */}
             {(() => {
               const pipe = selectedPipe
-              // Best video for auto-fill: last one with both runStart and runEnd
+
+              // Source video: most recent complete (inspStep>=8), else most recent with characteristics
+              const completeVids = pipe.videos.filter(v => (v.inspStep || 1) >= 8)
+              const sourceVideo = completeVids.length > 0
+                ? completeVids[completeVids.length - 1]
+                : pipe.videos.slice().reverse().find(v => v.characteristics && v.characteristics.length >= 2)
+              const newerIncomplete = completeVids.length > 0 && pipe.videos.some(v =>
+                (v.inspStep || 1) < 8 && pipe.videos.indexOf(v) > pipe.videos.indexOf(completeVids[completeVids.length - 1])
+              )
+
+              // Keep legacy auto-fill logic (best video with runStart+runEnd)
               const bestVideo = [...pipe.videos].reverse().find(v => v.runStart && v.runEnd)
               const analysisStart = bestVideo ? { type: bestVideo.runStart!.pipeType, diameter: bestVideo.runStart!.pipeSize, depth: bestVideo.runStart!.depth } : null
               const analysisEnd   = bestVideo ? { type: bestVideo.runEnd!.pipeType,   diameter: bestVideo.runEnd!.pipeSize,   depth: bestVideo.runEnd!.depth }   : null
@@ -3045,14 +3445,70 @@ export default function App() {
               return (
                 <Section>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                    <Label>Characteristics</Label>
+                    <Label>Pipe Overview</Label>
                     {!editingPipe && (
                       <button
-                        onClick={() => { setEditingPipe(true); setPipeForm({ start: pipe.start ?? { type: "", diameter: "", depth: "" }, end: pipe.end ?? { type: "", diameter: "", depth: "" }, length: pipe.length, slope: pipe.slope, transitions: pipe.transitions ?? [] }) }}
+                        onClick={() => {
+                          if (sourceVideo) {
+                            setSelectedVideoId(sourceVideo.id)
+                            setEditingStep(7)
+                          } else {
+                            setEditingPipe(true)
+                            setPipeForm({ start: pipe.start ?? { type: "", diameter: "", depth: "" }, end: pipe.end ?? { type: "", diameter: "", depth: "" }, length: pipe.length, slope: pipe.slope, transitions: pipe.transitions ?? [] })
+                          }
+                        }}
                         style={{ padding: "3px 9px", fontSize: 9.5, fontWeight: 700, background: C.card, color: C.cyan, border: `1px solid ${C.cyan}44`, borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
                       >Edit</button>
                     )}
                   </div>
+
+                  {/* Source attribution + profile graphic */}
+                  {sourceVideo && !editingPipe && (() => {
+                    const sv = sourceVideo
+                    const completenessLine = (() => {
+                      if (sv.fullyInspected === "Yes") {
+                        return <span style={{ color: "#00803E" }}>Fully inspected{sv.whyStopped ? ` · ${sv.whyStopped.toLowerCase()}` : ""}</span>
+                      }
+                      if (sv.fullyInspected === "Partially") {
+                        const aft = sv.assessableFootage ? `${sv.assessableFootage} of ${sv.stopFootage || "?"} ft assessable` : ""
+                        return <span style={{ color: "#A96B00" }}>Partially inspected{sv.notFullyReason ? ` — ${sv.notFullyReason.toLowerCase()}` : ""}{aft ? ` · ${aft}` : ""}</span>
+                      }
+                      if (sv.fullyInspected === "No") {
+                        return <span style={{ color: "#A96B00" }}>Not fully inspected{sv.notFullyReason ? ` — ${sv.notFullyReason.toLowerCase()}` : ""}</span>
+                      }
+                      return <span style={{ color: C.dim, fontStyle: "italic" }}>Inspection in progress</span>
+                    })()
+                    return (
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 9.5, color: C.muted, marginBottom: 2 }}>
+                          <span
+                            onClick={() => setSelectedVideoId(sv.id)}
+                            style={{ color: C.cyan, cursor: "pointer", fontWeight: 600 }}
+                          >{sv.name}</span>
+                          {sv.date ? ` · ${sv.date}` : ""}
+                          {sv.operator ? ` · ${sv.operator}` : ""}
+                        </div>
+                        <div style={{ fontSize: 9.5, marginBottom: newerIncomplete ? 4 : 0 }}>{completenessLine}</div>
+                        {newerIncomplete && (
+                          <div style={{ fontSize: 9.5, color: C.muted, fontStyle: "italic" }}>A newer inspection is still in progress.</div>
+                        )}
+                        {/* Profile graphic */}
+                        <div style={{ marginTop: 10, border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden", background: "#fff" }}>
+                          <PipeProfileSVG video={sv} pipe={pipe} onClickObs={id => {
+                            setSelectedVideoId(sv.id)
+                            const obsIdx = sv.observations.findIndex(o => o.id === id)
+                            if (obsIdx !== -1) setEditingStep(5)
+                          }} />
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  {!sourceVideo && !editingPipe && (
+                    <div style={{ padding: "14px 12px", marginBottom: 10, borderRadius: 6, background: C.card, border: `1px solid ${C.border}`, fontSize: 10, color: C.dim, fontStyle: "italic", textAlign: "center" }}>
+                      No camera inspection yet. This fills in once one is completed.
+                    </div>
+                  )}
 
                   {/* Coverage bar */}
                   {pipe.videos.length > 0 && (
@@ -3258,32 +3714,14 @@ export default function App() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                 <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase" }}>SAVED ANALYSES</div>
                 <button
-                  onClick={() => setShowVideoForm(v => !v)}
+                  onClick={() => addVideo("Camera Run " + (selectedPipe.videos.length + 1))}
                   style={{ padding: "3px 9px", fontSize: 9.5, background: "#00803E18", color: "#00803E", border: "1px solid #00803E44", borderRadius: 4, cursor: "pointer", fontWeight: 700, letterSpacing: "0.04em" }}
                 >
                   + CAMERA INSPECTION
                 </button>
               </div>
               {showVideoForm && (
-                <div
-                  onDragOver={e => { e.preventDefault(); setVideoDragOver(true) }}
-                  onDragLeave={() => setVideoDragOver(false)}
-                  onDrop={e => {
-                    e.preventDefault()
-                    setVideoDragOver(false)
-                    const file = e.dataTransfer.files[0]
-                    if (file) addVideo(file.name)
-                  }}
-                  style={{ marginBottom: 10, borderRadius: 7, border: `2px dashed ${videoDragOver ? "#00803E" : C.border}`, background: videoDragOver ? "#E8F4EF" : C.card, padding: "18px 14px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, transition: "all 0.15s" }}
-                >
-                  <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-                    <rect x="4" y="6" width="24" height="20" rx="3" stroke={C.muted} strokeWidth="1.5" />
-                    <polygon points="13,11 23,16 13,21" fill={C.muted} />
-                  </svg>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: C.text }}>Drop video here</div>
-                    <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>or</div>
-                  </div>
+                <div style={{ display: "none" }}>
                   <label style={{ cursor: "pointer" }}>
                     <input type="file" accept="video/*" style={{ display: "none" }} onChange={e => {
                       const file = e.target.files?.[0]
@@ -3301,6 +3739,8 @@ export default function App() {
               )}
               {selectedPipe.videos.map(video => {
                 const isOpen = selectedVideoId === video.id
+                const completeVids2 = selectedPipe.videos.filter(v => (v.inspStep || 1) >= 8)
+                const isActiveSource = completeVids2.length > 0 && completeVids2[completeVids2.length - 1].id === video.id
                 return (
                   <div key={video.id} style={{ marginBottom: 6, borderRadius: 6, border: `1px solid ${isOpen ? "#0369A1" : C.border}`, background: isOpen ? "#E0F0FA" : C.card, overflow: "hidden" }}>
                     <div style={{ padding: "10px 12px", display: "flex", alignItems: "center", gap: 10 }}>
@@ -3311,10 +3751,13 @@ export default function App() {
                         </svg>
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: isOpen ? "#0369A1" : C.text, fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {video.name}
+                        <div style={{ display: "flex", alignItems: "center", gap: 5, overflow: "hidden" }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: isOpen ? "#0369A1" : C.text, fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                            {video.name}
+                          </div>
+                          {isActiveSource && <span style={{ flexShrink: 0, fontSize: 8, fontWeight: 700, letterSpacing: "0.06em", padding: "1px 5px", borderRadius: 3, background: "#E8F4EF", color: "#00803E", border: "1px solid #00803E33" }}>OVERVIEW</span>}
                         </div>
-                        <div style={{ fontSize: 9.5, color: C.muted, marginTop: 1 }}>{video.date} · {video.operator} · {video.observations.length} obs.</div>
+                        <div style={{ fontSize: 9.5, color: C.muted, marginTop: 1 }}>{video.date} · {video.observations.length} obs. · {(video.inspStep || 1) >= 8 ? <span style={{ color: "#00803E", fontWeight: 700 }}>Complete</span> : `Step ${Math.min(video.inspStep || 1, 7)} of 7`}</div>
                       </div>
                       <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
                         <button
@@ -3331,26 +3774,111 @@ export default function App() {
               })}
             </Section>
 
-            {/* ── Video inspection flow ─────────────────────────────────────── */}
-            {selectedVideo && (
+            {/* ── Video inspection — 7-step stepper ────────────────────────── */}
+            {selectedVideo && (() => {
+              const sv = selectedVideo
+              const step = sv.inspStep || 1
+              const isDone = (n: number) => step > n && editingStep !== n
+              const isActive = (n: number) => step === n || editingStep === n
+              const isLocked = (n: number) => step < n
+
+              const stepCircle = (n: number) => (
+                <div style={{ width: 22, height: 22, borderRadius: "50%", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 700, background: isDone(n) ? "#00803E" : isActive(n) ? "#16202A" : "transparent", color: isDone(n) || isActive(n) ? "#fff" : C.dim, border: isLocked(n) ? `1.5px solid ${C.border}` : isDone(n) ? "none" : isActive(n) ? "none" : "none" }}>
+                  {isDone(n) ? "✓" : n}
+                </div>
+              )
+
+              const stepHdr = (n: number, summary?: string) => (
+                <div style={{ padding: "10px 16px", display: "flex", alignItems: "center", gap: 10 }}>
+                  {stepCircle(n)}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 10.5, fontWeight: isDone(n) || isActive(n) ? 700 : 500, color: isLocked(n) ? C.dim : C.text }}>{STEP_TITLES[n]}</div>
+                    {isDone(n) && !isActive(n) && summary && <div style={{ fontSize: 9, color: C.muted, marginTop: 1 }}>{summary}</div>}
+                  </div>
+                  {isDone(n) && !isActive(n) && (
+                    <button onClick={() => setEditingStep(n === editingStep ? null : n)} style={{ padding: "2px 8px", fontSize: 9, fontWeight: 700, color: C.muted, background: C.card, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer" }}>Change</button>
+                  )}
+                </div>
+              )
+
+              // CIPP concern logic (used in step 5 forms)
+              const cippSection = (isDefect = false) => {
+                const isCollapse = isDefect && captureForm.defectSubtype === "Complete collapse"
+                const autoYes = isDefect && (
+                  isCollapse ||
+                  ["Broken pipe","Missing bottom"].includes(String(captureForm.defectSubtype ?? "")) ||
+                  (["Offset","Hole"].includes(String(captureForm.defectSubtype ?? "")) && Number(captureForm.severity) >= 4)
+                )
+                const explicitVal = captureForm.cippConcern as boolean | undefined
+                const concern: boolean = isCollapse ? true : (explicitVal !== undefined ? explicitVal : autoYes)
+                return (
+                  <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.09em", textTransform: "uppercase" }}>CIPP INSTALLATION CONCERN?</div>
+                    {isCollapse
+                      ? <div style={{ fontSize: 9.5, color: "#CE1A74", fontStyle: "italic" }}>Set automatically — a complete collapse always rules out lining.</div>
+                      : <div style={{ display: "flex", gap: 6 }}>
+                          {([false, true] as const).map(v => (
+                            <button key={String(v)} onClick={() => setCaptureForm(f => ({ ...f, cippConcern: v }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: concern === v ? (v ? "#FFF0F5" : "#E8F4EF") : C.card, color: concern === v ? (v ? "#CE1A74" : "#00803E") : C.muted, border: `1.5px solid ${concern === v ? (v ? "#CE1A74" : "#00803E") : C.border}` }}>
+                              {v ? "Yes" : "No"}
+                            </button>
+                          ))}
+                        </div>
+                    }
+                    {concern && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", background: "#FFF8FA", borderRadius: 6, border: "1px solid #CE1A7422" }}>
+                        <div>
+                          <FieldLabel text="DEPTH (ft) *" />
+                          <input type="number" value={String(captureForm.cippDepth ?? "")} onChange={e => setCaptureForm(f => ({ ...f, cippDepth: e.target.value }))} style={inputSt} placeholder="ft" />
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                          {[{k:"cippLocateClose",label:"UP-CLOSE LOCATE IMAGE *"},{k:"cippLocateWide",label:"WIDE AREA LOCATE IMAGE *"}].map(({k,label}) => (
+                            <div key={k}>
+                              <FieldLabel text={label} />
+                              {captureForm[k] ? (
+                                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                  <div style={{ padding: "5px 8px", borderRadius: 4, background: "#E8F4EF", color: "#00803E", fontSize: 9.5, fontWeight: 700 }}>✓ Captured</div>
+                                  <button onClick={() => setCaptureForm(f => ({ ...f, [k]: false }))} style={{ fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer" }}>✕</button>
+                                </div>
+                              ) : (
+                                <button onClick={() => setCaptureForm(f => ({ ...f, [k]: true }))} style={{ width: "100%", padding: "7px", fontSize: 9.5, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        <div>
+                          <FieldLabel text="WHAT'S ABOVE AT THIS POINT" />
+                          <select value={String(captureForm.cippAboveGround ?? "")} onChange={e => setCaptureForm(f => ({ ...f, cippAboveGround: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                            <option value="">— select —</option>
+                            {ABOVE_GROUND_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                          {MUNICIPAL_SURFACES.includes(String(captureForm.cippAboveGround ?? "")) && (
+                            <div style={{ marginTop: 4, padding: "5px 8px", borderRadius: 4, background: "#FFFBF0", border: "1px solid #F59E0B44", fontSize: 9.5, color: "#A96B00", lineHeight: 1.4 }}>⚠ Under municipal property — permit, traffic control and municipal restoration required.</div>
+                          )}
+                        </div>
+                        <div>
+                          <FieldLabel text="NOTES FOR THE ESTIMATOR" />
+                          <textarea value={String(captureForm.cippNotes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, cippNotes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              }
+
+              const cippCount = sv.observations.filter(o => o.cippConcern).length
+              const cippMissing = sv.observations.filter(o => o.cippConcern && (!o.cippDepth || !o.cippLocateClose || !o.cippLocateWide)).length
+              const step5Complete = sv.observationsClosed && cippMissing === 0
+
+              return (
               <div style={{ borderTop: `2px solid ${C.border}` }}>
 
-                {/* Region A — header */}
-                <div style={{ padding: "12px 16px 10px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 10 }}>
+                {/* Stepper header */}
+                <div style={{ padding: "10px 16px 10px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>Analysis — {selectedVideo.direction}</div>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: "#16202A", fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {selectedVideo.name}
-                    </div>
+                    <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>CAMERA INSPECTION · STEP {Math.min(step, 7)} OF 7</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#16202A", fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sv.name}</div>
                   </div>
-                  <div style={{ fontSize: 9, fontFamily: "JetBrains Mono", color: C.muted, whiteSpace: "nowrap" }}>
-                    {selectedVideo.observations.length} obs.
-                  </div>
-                  <button
-                    onClick={() => setInspectionFullscreen(true)}
-                    title="Open full screen"
-                    style={{ flexShrink: 0, padding: "5px 10px", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.05em", background: "#16202A", color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
-                  >
+                  <button onClick={() => setInspectionFullscreen(true)} title="Full screen" style={{ flexShrink: 0, padding: "5px 10px", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.05em", background: "#16202A", color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
                     <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
                       <path d="M1 4V1h3M7 1h3v3M10 7v3H7M4 10H1V7" stroke="white" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
@@ -3358,9 +3886,145 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* Region B — video player */}
-                <div style={{ padding: "12px 16px 0" }}>
-                  <div style={{ width: "100%", aspectRatio: "16/9", background: "#0A1520", borderRadius: 8, border: `1px solid ${C.border}`, position: "relative", overflow: "hidden", marginBottom: 8 }}>
+                {/* ── Step 1 — Set up ───────────────────────────────────────── */}
+                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(1) ? 0.45 : 1 }}>
+                  {stepHdr(1, [sv.purpose, sv.direction, sv.entryPipeSize, sv.entryPipeType, sv.entryDepth ? `${fmtFtIn(sv.entryDepth)} deep` : ""].filter(Boolean).join(" · "))}
+                  {isActive(1) && (
+                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div>
+                        <FieldLabel text="PURPOSE *" />
+                        <select value={step1Form.purpose} onChange={e => setStep1Form(f => ({ ...f, purpose: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                          <option value="">— select —</option>
+                          {PURPOSE_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <FieldLabel text="LAUNCHED FROM *" />
+                        <input value={step1Form.launchedFrom} onChange={e => setStep1Form(f => ({ ...f, launchedFrom: e.target.value }))} placeholder="e.g. CF-01" style={inputSt} />
+                      </div>
+                      <div>
+                        <FieldLabel text="DIRECTION *" />
+                        <div style={{ display: "flex", gap: 6 }}>
+                          {(["downstream","upstream"] as const).map(d => (
+                            <button key={d} onClick={() => setStep1Form(f => ({ ...f, direction: d }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step1Form.direction === d ? C.cyan : C.card, color: step1Form.direction === d ? "#fff" : C.muted, border: `1.5px solid ${step1Form.direction === d ? C.cyan : C.border}`, textTransform: "capitalize" }}>{d}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <FieldLabel text="ZERO REFERENCE *" />
+                        <select value={step1Form.zeroRef} onChange={e => setStep1Form(f => ({ ...f, zeroRef: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                          {ZERO_REF_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                        <div style={{ marginTop: 4, fontSize: 9, color: C.muted, lineHeight: 1.4 }}>Footage measured along the pipe, not from the floor. Keep this consistent between inspections of the same run or their footages won't line up.</div>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        <div>
+                          <FieldLabel text="PIPE SIZE AT ENTRY *" />
+                          <select value={step1Form.entryPipeSize} onChange={e => setStep1Form(f => ({ ...f, entryPipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                            <option value="">—</option>
+                            {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <FieldLabel text="PIPE TYPE AT ENTRY *" />
+                          <select value={step1Form.entryPipeType} onChange={e => setStep1Form(f => ({ ...f, entryPipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                            <option value="">—</option>
+                            {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <FieldLabel text="DEPTH AT ENTRY (ft) *" />
+                        <input type="number" value={step1Form.entryDepth} onChange={e => setStep1Form(f => ({ ...f, entryDepth: e.target.value }))} style={inputSt} placeholder="ft" />
+                      </div>
+                      <button
+                        disabled={!step1Form.purpose || !step1Form.launchedFrom || !step1Form.direction || !step1Form.zeroRef || !step1Form.entryPipeSize || !step1Form.entryPipeType || !step1Form.entryDepth}
+                        onClick={() => { updateVideo({ purpose: step1Form.purpose, launchedFrom: step1Form.launchedFrom, direction: step1Form.direction, zeroRef: step1Form.zeroRef, entryPipeSize: step1Form.entryPipeSize, entryPipeType: step1Form.entryPipeType, entryDepth: step1Form.entryDepth, inspStep: Math.max(step, 2) }); setEditingStep(null) }}
+                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: (step1Form.purpose && step1Form.launchedFrom && step1Form.entryPipeSize && step1Form.entryPipeType && step1Form.entryDepth) ? "#16202A" : C.card, color: (step1Form.purpose && step1Form.launchedFrom && step1Form.entryPipeSize && step1Form.entryPipeType && step1Form.entryDepth) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
+                      >
+                        {editingStep === 1 ? "Save Changes" : "Next →"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Step 2 — Push ─────────────────────────────────────────── */}
+                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(2) ? 0.45 : 1 }}>
+                  {stepHdr(2, "Push complete")}
+                  {isActive(2) && (
+                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+                      <div style={{ padding: "12px 14px", borderRadius: 7, background: "#F8FAFC", border: `1px solid ${C.border}`, fontSize: 10.5, color: C.text, lineHeight: 1.6 }}>
+                        Push at a steady pace. Stop briefly at <strong>every connection</strong> and at <strong>any observation more severe than moderate</strong>, until the end is reached or the camera won't go further.<br /><br />Nothing to enter here — that comes next.
+                      </div>
+                      <button onClick={() => { updateVideo({ inspStep: Math.max(step, 3) }); setEditingStep(null) }} style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, background: "#CE1A74", color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: "pointer" }}>
+                        Camera Stopped →
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Step 3 — Why the camera stopped ───────────────────────── */}
+                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(3) ? 0.45 : 1 }}>
+                  {stepHdr(3, [sv.whyStopped, sv.stopFootage ? `stopped at ${fmtFtIn(sv.stopFootage)}` : ""].filter(Boolean).join(" · "))}
+                  {isActive(3) && (
+                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div>
+                        <FieldLabel text="WHY THE CAMERA STOPPED *" />
+                        <select value={step3Form.whyStopped} onChange={e => setStep3Form(f => ({ ...f, whyStopped: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                          <option value="">— select —</option>
+                          {WHY_STOPPED_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <FieldLabel text="STOP FOOTAGE *" />
+                        <FootageRow footage={step3Form.stopFootage} onChange={v => setStep3Form(f => ({ ...f, stopFootage: v }))} />
+                      </div>
+                      <div>
+                        <FieldLabel text="NOTES" />
+                        <textarea value={step3Form.stopNotes} onChange={e => setStep3Form(f => ({ ...f, stopNotes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Any detail about what stopped the camera…" />
+                      </div>
+                      <button
+                        disabled={!step3Form.whyStopped || !step3Form.stopFootage}
+                        onClick={() => { updateVideo({ whyStopped: step3Form.whyStopped, stopFootage: step3Form.stopFootage, stopNotes: step3Form.stopNotes, inspStep: Math.max(step, 4) }); setEditingStep(null) }}
+                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step3Form.whyStopped && step3Form.stopFootage ? "#16202A" : C.card, color: step3Form.whyStopped && step3Form.stopFootage ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
+                      >
+                        {editingStep === 3 ? "Save Changes" : "Next →"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Step 4 — Upload the recording ─────────────────────────── */}
+                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(4) ? 0.45 : 1 }}>
+                  {stepHdr(4, sv.name ? `Recording: ${sv.name}` : undefined)}
+                  {isActive(4) && (
+                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>Download from the reel, then upload here. Analysis happens next.</div>
+                      <div onDragOver={e => { e.preventDefault(); setVideoDragOver(true) }} onDragLeave={() => setVideoDragOver(false)} onDrop={e => { e.preventDefault(); setVideoDragOver(false); const f = e.dataTransfer.files[0]; if (f) { updateVideo({ name: f.name, inspStep: Math.max(step, 5) }) } }} style={{ borderRadius: 7, border: `2px dashed ${videoDragOver ? C.cyan : C.border}`, background: videoDragOver ? "#E8F4EF" : C.card, padding: "18px 14px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, transition: "all 0.15s" }}>
+                        <svg width="28" height="28" viewBox="0 0 32 32" fill="none"><rect x="4" y="6" width="24" height="20" rx="3" stroke={C.muted} strokeWidth="1.5"/><polygon points="13,11 23,16 13,21" fill={C.muted}/></svg>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: C.text }}>Drop video here</div>
+                        <label style={{ cursor: "pointer" }}>
+                          <input type="file" accept="video/*" style={{ display: "none" }} onChange={e => { const f = e.target.files?.[0]; if (f) { updateVideo({ name: f.name, inspStep: Math.max(step, 5) }) } }} />
+                          <div style={{ padding: "7px 16px", background: C.cyan, color: "#fff", borderRadius: 5, fontSize: 10.5, fontWeight: 700 }}>CHOOSE FILE</div>
+                        </label>
+                      </div>
+                      <button onClick={() => { updateVideo({ inspStep: Math.max(step, 5) }); setEditingStep(null) }} style={{ width: "100%", padding: "7px", fontSize: 10, color: C.muted, background: "none", border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>
+                        Skip — no recording yet
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Step 5 — Sewer camera analysis ────────────────────────── */}
+                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(5) ? 0.45 : 1 }}>
+                  {stepHdr(5, `${sv.observations.length} obs.${cippCount ? ` · ${cippCount} CIPP concern${cippCount !== 1 ? "s" : ""}` : ""}`)}
+                  {isActive(5) && (
+                    <div>
+                      <div style={{ padding: "10px 16px 8px", fontSize: 9.5, color: C.muted, lineHeight: 1.5, borderBottom: `1px solid ${C.border}` }}>Work through the recording and log what you see. Footage opens at the last observation — the camera only moves forward. Anything that affects lining is located here, while the camera is still at that footage.</div>
+
+                      {/* Video player */}
+                      <div style={{ padding: "12px 16px 0" }}>
+                        <div style={{ width: "100%", aspectRatio: "16/9", background: "#0A1520", borderRadius: 8, border: `1px solid ${C.border}`, position: "relative", overflow: "hidden", marginBottom: 8 }}>
                     <svg width="100%" height="100%" viewBox="0 0 328 185" preserveAspectRatio="xMidYMid slice">
                       <rect width="328" height="185" fill="#0A1520" />
                       <ellipse cx="164" cy="95" rx="78" ry="78" fill="none" stroke="#0F2030" strokeWidth="12" />
@@ -3499,6 +4163,7 @@ export default function App() {
                           <FieldLabel text="WHAT IT SERVES" />
                           <input value={String(captureForm.tieServes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, tieServes: e.target.value }))} placeholder="Bldg 2 stack, laundry, area drain…" style={inputSt} />
                         </div>
+                        {cippSection()}
                         <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.tieSubtype} />
                       </div>
                     )}
@@ -3540,6 +4205,7 @@ export default function App() {
                           <FieldLabel text="NOTES" />
                           <textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Describe what you see…" />
                         </div>
+                        {cippSection(true)}
                         <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.defectSubtype} />
                       </div>
                     )}
@@ -3595,6 +4261,7 @@ export default function App() {
                           <FieldLabel text="NOTES" />
                           <textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="" />
                         </div>
+                        {cippSection()}
                         <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.directionWhich} />
                       </div>
                     )}
@@ -3609,150 +4276,48 @@ export default function App() {
                         <div style={{ padding: "8px 10px", borderRadius: 5, background: "#F0F4F8", fontSize: 10, color: "#5F6E7C", lineHeight: 1.5 }}>
                           This runs to the next change, or to the run end. A size change means separate liner setups, so it changes the price.
                         </div>
+                        {cippSection()}
                         <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.pipeType || !captureForm.pipeSize} />
                       </div>
                     )}
                   </div>
                 )}
 
-                {/* Region D — run length */}
-                <div style={{ padding: "12px 16px 0" }}>
-                  <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>RUN LENGTH & DEPTH</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-
-                    {/* Run start */}
-                    <div style={{ padding: "10px 11px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.card }}>
-                      <div style={{ fontSize: 8.5, color: C.muted, letterSpacing: "0.09em", textTransform: "uppercase", marginBottom: 5 }}>Run start</div>
-                      {selectedVideo.runStart ? (
-                        <>
-                          <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "JetBrains Mono", color: "#16202A" }}>{selectedVideo.runStart.footage} ft</div>
-                          {selectedVideo.runStart.depth && <div style={{ fontSize: 10, color: C.muted, marginTop: 1 }}>Depth: {selectedVideo.runStart.depth} ft</div>}
-                          <div style={{ fontSize: 9.5, color: C.muted, marginTop: 2 }}>{selectedVideo.runStart.pipeSize} {selectedVideo.runStart.pipeType}</div>
-                        </>
-                      ) : (
-                        <div style={{ fontSize: 10, color: C.dim, fontStyle: "italic" }}>Not set</div>
-                      )}
-                    </div>
-
-                    {/* Run end */}
-                    <div
-                      onClick={() => { if (selectedVideo.observationsClosed && !selectedVideo.runEnd) setShowRunEndForm(true) }}
-                      style={{
-                        padding: "10px 11px", borderRadius: 6,
-                        border: selectedVideo.observationsClosed ? `1.5px solid #CE1A74` : `1px dashed ${C.border}`,
-                        background: selectedVideo.runEnd ? C.card : "#FAFBFC",
-                        opacity: selectedVideo.observationsClosed ? 1 : 0.45,
-                        cursor: selectedVideo.observationsClosed && !selectedVideo.runEnd ? "pointer" : "default",
-                      }}
-                    >
-                      <div style={{ fontSize: 8.5, color: C.muted, letterSpacing: "0.09em", textTransform: "uppercase", marginBottom: 5 }}>Run end</div>
-                      {selectedVideo.runEnd ? (
-                        <>
-                          <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "JetBrains Mono", color: "#16202A" }}>{selectedVideo.runEnd.footage} ft</div>
-                          {selectedVideo.runEnd.depth && <div style={{ fontSize: 10, color: C.muted, marginTop: 1 }}>Depth: {selectedVideo.runEnd.depth} ft</div>}
-                          <div style={{ fontSize: 9.5, color: C.muted, marginTop: 2 }}>{selectedVideo.runEnd.pipeSize} {selectedVideo.runEnd.pipeType}</div>
-                        </>
-                      ) : (
-                        <div style={{ fontSize: 9.5, color: selectedVideo.observationsClosed ? "#CE1A74" : C.dim, fontStyle: "italic", lineHeight: 1.4 }}>
-                          {selectedVideo.observationsClosed ? "Tap to record footage, pipe type and size." : "Locked until you've finished logging observations."}
-                        </div>
-                      )}
-                    </div>
+                {/* Observation log */}
+                <div style={{ padding: "0 16px 12px" }}>
+                  <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>LOGGED ON THIS RUN
+                    {cippMissing > 0 && <span style={{ marginLeft: 8, padding: "1px 6px", background: "#FEF2F2", color: "#DC2626", borderRadius: 3, fontSize: 8.5, fontWeight: 700 }}>{cippMissing} CIPP concern{cippMissing !== 1 ? "s" : ""} still need a locate</span>}
                   </div>
-
-                  {/* Run end summary */}
-                  {selectedVideo.runEnd && selectedVideo.runStart && (
-                    <div style={{ marginTop: 8, padding: "7px 10px", borderRadius: 5, background: "#E8F4EF", border: "1px solid #00803E44", textAlign: "center", fontFamily: "JetBrains Mono", fontSize: 12, fontWeight: 700, color: "#00803E" }}>
-                      {Math.abs(parseFloat(selectedVideo.runEnd.footage) - parseFloat(selectedVideo.runStart.footage)).toFixed(0)} ft inspected{selectedVideo.runStart.depth && selectedVideo.runEnd.depth ? ` · Δ depth ${Math.abs(parseFloat(selectedVideo.runEnd.depth) - parseFloat(selectedVideo.runStart.depth)).toFixed(1)} ft` : ""}
-                    </div>
-                  )}
-
-                  {/* Run end form */}
-                  {showRunEndForm && (
-                    <div style={{ marginTop: 10, padding: "12px 12px 10px", borderRadius: 8, border: "1.5px solid #CE1A74", background: "#FFF8FA", display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: "#CE1A74", letterSpacing: "0.08em", textTransform: "uppercase" }}>RECORD RUN END</div>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                        <div>
-                          <FieldLabel text="FOOTAGE AT END *" />
-                          <input type="number" value={runEndForm.footage} onChange={e => setRunEndForm(f => ({ ...f, footage: e.target.value }))} style={inputSt} placeholder="0" />
-                        </div>
-                        <div>
-                          <FieldLabel text="DEPTH AT END" />
-                          <input type="number" value={runEndForm.depth} onChange={e => setRunEndForm(f => ({ ...f, depth: e.target.value }))} style={inputSt} placeholder="ft" />
-                        </div>
-                      </div>
-                      <ChipField label="TYPE OF PIPE *" options={PIPE_TYPES} value={runEndForm.pipeType} onChange={v => setRunEndForm(f => ({ ...f, pipeType: v }))} color="#CE1A74" pricing />
-                      <ChipField label="SIZE OF PIPE *" options={PIPE_SIZES} value={runEndForm.pipeSize} onChange={v => setRunEndForm(f => ({ ...f, pipeSize: v }))} color="#CE1A74" pricing />
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button onClick={() => setShowRunEndForm(false)} style={{ flex: 1, padding: "7px", fontSize: 10, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Cancel</button>
-                        <button onClick={saveRunEnd} disabled={!runEndForm.footage || !runEndForm.pipeType || !runEndForm.pipeSize} style={{ flex: 2, padding: "7px", fontSize: 10, fontWeight: 700, background: runEndForm.footage ? "#CE1A74" : C.card, color: runEndForm.footage ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: runEndForm.footage ? "pointer" : "default" }}>
-                          Save Run End
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  <div style={{ marginTop: 8, marginBottom: 12, fontSize: 9.5, color: C.muted, lineHeight: 1.4 }}>
-                    {selectedVideo.observationsClosed ? "Observations closed. Record the run end above." : "Log every tie-in, defect and change first — the run end comes last."}
-                  </div>
-                </div>
-
-                {/* Region E — observation log */}
-                <div style={{ padding: "0 16px 16px" }}>
-                  <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>LOGGED ON THIS RUN</div>
-                  {selectedVideo.observations.length === 0 ? (
+                  {sv.observations.length === 0 ? (
                     <div style={{ fontSize: 11, color: C.dim, fontStyle: "italic" }}>Nothing logged yet.</div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                      {[...selectedVideo.observations].sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0")).map(obs => {
+                      {[...sv.observations].sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0")).map(obs => {
                         const col = OBS_COLOR[obs.type]
-                        // Build summary chips
                         const chips: string[] = []
-                        if (obs.type === "tie-in") {
-                          if (obs.tieSubtype) chips.push(obs.tieSubtype)
-                          if (obs.tieSize) chips.push(obs.tieSize)
-                          if (obs.tieOrientation?.length) chips.push(obs.tieOrientation.map(h => `${h} o'clock`).join(" & "))
-                        } else if (obs.type === "defect") {
-                          if (obs.defectSubtype) chips.push(obs.defectSubtype)
-                          if (obs.defectOrientation?.length) chips.push(obs.defectOrientation.map(h => `${h} o'clock`).join(" & "))
-                          if (obs.severity) chips.push(SEV_LABEL[obs.severity])
-                        } else if (obs.type === "excavation") {
-                          if (obs.depthBand) chips.push(obs.depthBand + " deep")
-                          if (obs.surface) chips.push(obs.surface)
-                        } else if (obs.type === "direction-change") {
-                          if (obs.directionWhich) chips.push(obs.directionWhich)
-                          if (obs.directionFitting) chips.push(obs.directionFitting)
-                        } else if (obs.type === "pipe-transition") {
-                          if (obs.pipeSize) chips.push(obs.pipeSize)
-                          if (obs.pipeType) chips.push(obs.pipeType)
-                        }
-
+                        if (obs.type === "tie-in") { if (obs.tieSubtype) chips.push(obs.tieSubtype); if (obs.tieSize) chips.push(obs.tieSize) }
+                        else if (obs.type === "defect") { if (obs.defectSubtype) chips.push(obs.defectSubtype); if (obs.severity) chips.push(SEV_LABEL[obs.severity]) }
+                        else if (obs.type === "excavation") { if (obs.depthBand) chips.push(obs.depthBand + " deep"); if (obs.surface) chips.push(obs.surface) }
+                        else if (obs.type === "direction-change") { if (obs.directionWhich) chips.push(obs.directionWhich); if (obs.directionFitting) chips.push(obs.directionFitting) }
+                        else if (obs.type === "pipe-transition") { if (obs.pipeSize) chips.push(obs.pipeSize); if (obs.pipeType) chips.push(obs.pipeType) }
+                        const cippBad = obs.cippConcern && (!obs.cippDepth || !obs.cippLocateClose || !obs.cippLocateWide)
                         return (
                           <div key={obs.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", borderRadius: 6, background: C.card, borderTop: `1px solid ${col}18`, borderRight: `1px solid ${col}18`, borderBottom: `1px solid ${col}18`, borderLeft: `3px solid ${col}` }}>
-                            {/* Footage */}
                             <div style={{ flexShrink: 0, minWidth: 34, textAlign: "right" }}>
-                              <div style={{ fontSize: 11, fontFamily: "JetBrains Mono", fontWeight: 700, color: col }}>{obs.footage ?? "—"}{obs.footageTo ? `–${obs.footageTo}` : ""}</div>
-                              <div style={{ fontSize: 8.5, color: C.dim }}>ft</div>
+                              <div style={{ fontSize: 11, fontFamily: "JetBrains Mono", fontWeight: 700, color: col }}>{fmtFtIn(obs.footage ?? "0")}</div>
+                              {obs.footageTo && <div style={{ fontSize: 8.5, color: C.dim }}>–{fmtFtIn(obs.footageTo)}</div>}
                             </div>
-                            {/* Content */}
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", marginBottom: 4 }}>
                                 <span style={{ fontSize: 8.5, fontWeight: 700, color: col, letterSpacing: "0.08em", textTransform: "uppercase" }}>{OBS_LABEL[obs.type]}</span>
-                                {obs.type === "defect" && obs.severity && (
-                                  <span style={{ padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700, background: SEV_COLOR[obs.severity] + "22", color: SEV_COLOR[obs.severity], letterSpacing: "0.06em" }}>
-                                    {obs.severity} {SEV_LABEL[obs.severity]}
-                                  </span>
-                                )}
+                                {obs.type === "defect" && obs.severity && <span style={{ padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700, background: SEV_COLOR[obs.severity] + "22", color: SEV_COLOR[obs.severity] }}>{SEV_LABEL[obs.severity]}</span>}
+                                {obs.cippConcern && <span style={{ padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700, background: cippBad ? "#FEF2F2" : "#FFF0F5", color: cippBad ? "#DC2626" : "#CE1A74" }}>{cippBad ? "⚠ CIPP — incomplete" : "CIPP concern"}</span>}
                               </div>
                               <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                                {chips.map((chip, i) => (
-                                  <span key={i} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: col + "12", color: col, fontFamily: "JetBrains Mono" }}>{chip}</span>
-                                ))}
+                                {chips.map((chip, i) => <span key={i} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: col + "12", color: col, fontFamily: "JetBrains Mono" }}>{chip}</span>)}
                               </div>
                               {obs.notes && <div style={{ fontSize: 10, color: C.muted, marginTop: 4, lineHeight: 1.4 }}>{obs.notes}</div>}
-                              {obs.tieServes && <div style={{ fontSize: 10, color: C.muted, marginTop: 4 }}>{obs.tieServes}</div>}
                             </div>
-                            {/* Delete */}
                             <button onClick={() => deleteObservation(obs.id)} style={{ flexShrink: 0, padding: "2px 6px", fontSize: 9, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 3, cursor: "pointer", marginTop: 1 }}>✕</button>
                           </div>
                         )
@@ -3761,44 +4326,164 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Footer — Done */}
+                {/* Step 5 footer */}
                 <div style={{ padding: "10px 16px 16px", borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
-                  <button
-                    onClick={() => setObsClosed(!selectedVideo.observationsClosed)}
-                    style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", borderRadius: 5, cursor: "pointer", transition: "all 0.15s", background: selectedVideo.observationsClosed ? "transparent" : "#16202A", color: selectedVideo.observationsClosed ? C.muted : "#fff", border: selectedVideo.observationsClosed ? `1px solid ${C.border}` : "none" }}
-                  >
-                    {selectedVideo.observationsClosed ? "Back to observations" : "Done adding observations"}
+                  <button onClick={() => setObsClosed(!sv.observationsClosed)} style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", borderRadius: 5, cursor: "pointer", background: sv.observationsClosed ? "transparent" : "#16202A", color: sv.observationsClosed ? C.muted : "#fff", border: sv.observationsClosed ? `1px solid ${C.border}` : "none" }}>
+                    {sv.observationsClosed ? "Back to observations" : "Done adding observations"}
                   </button>
-                  <button
-                    disabled={!selectedVideo.observationsClosed || !selectedVideo.runEnd}
-                    onClick={() => {
-                      if (!selectedVideo.observationsClosed || !selectedVideo.runEnd) return
-                      setIncompletePipeIds(prev => { const s = new Set(prev); s.delete(selectedPipeId!); return s })
-                      setSelectedVideoId(null)
-                      setCaptureStep("none")
-                    }}
-                    style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", borderRadius: 6, cursor: (selectedVideo.observationsClosed && selectedVideo.runEnd) ? "pointer" : "default", background: (selectedVideo.observationsClosed && selectedVideo.runEnd) ? "#00803E" : C.card, color: (selectedVideo.observationsClosed && selectedVideo.runEnd) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
-                  >
-                    Complete Analysis
+                  {cippMissing > 0 && sv.observationsClosed && (
+                    <div style={{ padding: "7px 10px", borderRadius: 5, background: "#FEF2F2", border: "1px solid #FECACA", fontSize: 9.5, color: "#DC2626" }}>
+                      {cippMissing} CIPP concern{cippMissing !== 1 ? "s" : ""} still need a depth and both locate images before you can continue.
+                    </div>
+                  )}
+                  <button disabled={!step5Complete} onClick={() => { if (step5Complete) { updateVideo({ inspStep: Math.max(step, 6) }); setEditingStep(null) } }} style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", borderRadius: 6, cursor: step5Complete ? "pointer" : "default", background: step5Complete ? "#00803E" : C.card, color: step5Complete ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}>
+                    Continue to Step 6 →
                   </button>
-                  {!selectedVideo.observationsClosed && (
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                      <div style={{ fontSize: 9.5, color: C.dim }}>Finish logging observations to enable Complete.</div>
+                </div>
+            </div>
+          )}
+        </div>
+
+                {/* ── Step 6 — Was the pipe fully inspected? ─────────────────── */}
+                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(6) ? 0.45 : 1 }}>
+                  {stepHdr(6, sv.fullyInspected ? [sv.fullyInspected, sv.notFullyReason].filter(Boolean).join(" — ") : undefined)}
+                  {isActive(6) && (
+                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ fontSize: 9.5, color: C.muted, fontStyle: "italic", lineHeight: 1.4 }}>A separate judgement from why the camera stopped. A camera can reach the city main and still show nothing useable for forty feet because the line was full of grease.</div>
+                      <div>
+                        <FieldLabel text="WAS THE PIPE FULLY INSPECTED? *" />
+                        <div style={{ display: "flex", gap: 6 }}>
+                          {(["Yes","Partially","No"] as const).map(v => (
+                            <button key={v} onClick={() => setStep6Form(f => ({ ...f, fullyInspected: v }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step6Form.fullyInspected === v ? (v === "Yes" ? "#E8F4EF" : v === "No" ? "#FEF2F2" : "#FFFBF0") : C.card, color: step6Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.muted, border: `1.5px solid ${step6Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.border}` }}>{v}</button>
+                          ))}
+                        </div>
+                      </div>
+                      {step6Form.fullyInspected && step6Form.fullyInspected !== "Yes" && (
+                        <>
+                          <div>
+                            <FieldLabel text="WHY NOT FULLY INSPECTED *" />
+                            <select value={step6Form.notFullyReason} onChange={e => setStep6Form(f => ({ ...f, notFullyReason: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                              <option value="">— select —</option>
+                              {NOT_FULLY_REASON_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <FieldLabel text="FOOTAGE ACTUALLY ASSESSABLE" />
+                            <FootageRow footage={step6Form.assessableFootage} onChange={v => setStep6Form(f => ({ ...f, assessableFootage: v }))} />
+                          </div>
+                        </>
+                      )}
                       <button
-                        onClick={() => {
-                          if (selectedPipeId) setIncompletePipeIds(prev => new Set([...prev, selectedPipeId]))
-                          setSelectedVideoId(null)
-                          setCaptureStep("none")
-                        }}
-                        style={{ flexShrink: 0, padding: "4px 10px", fontSize: 9, fontWeight: 600, letterSpacing: "0.04em", background: "transparent", color: "#A96B00", border: "1px solid #A96B00", borderRadius: 4, cursor: "pointer", whiteSpace: "nowrap" }}
+                        disabled={!step6Form.fullyInspected || (step6Form.fullyInspected !== "Yes" && !step6Form.notFullyReason)}
+                        onClick={() => { updateVideo({ fullyInspected: step6Form.fullyInspected as "Yes"|"Partially"|"No", notFullyReason: step6Form.notFullyReason, assessableFootage: step6Form.assessableFootage, inspStep: Math.max(step, 7) }); setEditingStep(null) }}
+                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: (step6Form.fullyInspected && (step6Form.fullyInspected === "Yes" || step6Form.notFullyReason)) ? "#16202A" : C.card, color: (step6Form.fullyInspected && (step6Form.fullyInspected === "Yes" || step6Form.notFullyReason)) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
                       >
-                        Close anyway
+                        {editingStep === 6 ? "Save Changes" : "Next →"}
                       </button>
                     </div>
                   )}
                 </div>
+
+                {/* ── Step 7 — Characteristics ──────────────────────────────── */}
+                <div style={{ opacity: isLocked(7) ? 0.45 : 1 }}>
+                  {stepHdr(7, sv.characteristics ? `${sv.characteristics.length} change point${sv.characteristics.length !== 1 ? "s" : ""}` : undefined)}
+                  {isActive(7) && (
+                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ fontSize: 9.5, color: C.muted, lineHeight: 1.4 }}>A row is a change point. Add one whenever depth or what's above the ground changes — a new row copies the one above it, so you edit only what moved. Pipe material and size changes are logged as observations in step 5.</div>
+                      {/* Characteristics table */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        {/* Header */}
+                        <div style={{ display: "grid", gridTemplateColumns: "56px 1fr 1fr 1fr", gap: 6, padding: "4px 8px", fontSize: 8, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                          <div />
+                          <div>LENGTH</div>
+                          <div>DEPTH</div>
+                          <div>ABOVE GROUND</div>
+                        </div>
+                        {step7Rows.map((row, idx) => {
+                          const isMunicipal = MUNICIPAL_SURFACES.includes(row.aboveGround)
+                          const imgs = row.images ?? []
+                          return (
+                            <div key={row.id} style={{ borderRadius: 5, background: C.card, border: `1px solid ${isMunicipal ? "#F59E0B44" : C.border}`, overflow: "hidden" }}>
+                              {/* Fields row */}
+                              <div style={{ display: "grid", gridTemplateColumns: "56px 1fr 1fr 1fr", gap: 6, alignItems: "center", padding: "6px 8px", position: "relative" }}>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: C.muted }}>
+                                  {row.isStart ? "START" : row.isEnd ? "END" : `${idx}`}
+                                  {isMunicipal && <span style={{ marginLeft: 4, color: "#A96B00" }}>⚠</span>}
+                                </div>
+                                <div>
+                                  {row.isStart
+                                    ? <span style={{ fontSize: 11, fontFamily: "JetBrains Mono", fontWeight: 700, color: C.dim }}>0 ft</span>
+                                    : <input type="number" value={row.length} onChange={e => setStep7Rows(rs => rs.map(r => r.id === row.id ? { ...r, length: e.target.value } : r))} style={{ ...inputSt, padding: "4px 6px", fontSize: 10 }} placeholder="ft" />
+                                  }
+                                </div>
+                                <input type="number" value={row.depth} onChange={e => setStep7Rows(rs => rs.map(r => r.id === row.id ? { ...r, depth: e.target.value } : r))} style={{ ...inputSt, padding: "4px 6px", fontSize: 10 }} placeholder="ft" />
+                                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                                  <select value={row.aboveGround} onChange={e => { const ag = e.target.value; setStep7Rows(rs => rs.map(r => r.id === row.id ? { ...r, aboveGround: ag, ownership: ownershipFor(ag) } : r)) }} style={{ ...inputSt, padding: "4px 4px", fontSize: 9 }}>
+                                    <option value="">—</option>
+                                    {ABOVE_GROUND_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                                  </select>
+                                  {row.aboveGround === "Living Space(s)" && (
+                                    <input value={row.unitNumbers ?? ""} onChange={e => setStep7Rows(rs => rs.map(r => r.id === row.id ? { ...r, unitNumbers: e.target.value } : r))} style={{ ...inputSt, padding: "3px 5px", fontSize: 9 }} placeholder="e.g. 3B, 3C" />
+                                  )}
+                                </div>
+                                {!row.isStart && !row.isEnd && (
+                                  <button onClick={() => setStep7Rows(rs => rs.filter(r => r.id !== row.id))} style={{ position: "absolute", top: 4, right: 6, fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer", lineHeight: 1 }}>✕</button>
+                                )}
+                              </div>
+                              {/* Image upload section */}
+                              <div style={{ borderTop: `1px solid ${C.border}`, padding: "6px 8px 8px", display: "flex", flexDirection: "column", gap: 5 }}>
+                                <div style={{ fontSize: 8, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Area Photos</div>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
+                                  {imgs.map((name, i) => (
+                                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 7px 3px 8px", borderRadius: 4, background: "#E8F4EF", border: "1px solid #00803E33" }}>
+                                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="0.5" y="0.5" width="9" height="9" rx="1.5" stroke="#00803E" strokeWidth="1"/><path d="M1 7l2-2 1.5 1.5 2-2.5 2.5 3" stroke="#00803E" strokeWidth="0.9" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                                      <span style={{ fontSize: 8.5, color: "#00803E", fontWeight: 600, maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+                                      <button onClick={() => setStep7Rows(rs => rs.map(r => r.id === row.id ? { ...r, images: r.images?.filter((_, j) => j !== i) } : r))} style={{ fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer", padding: 0, lineHeight: 1 }}>✕</button>
+                                    </div>
+                                  ))}
+                                  <label style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 4, background: C.panel, border: `1.5px dashed ${C.border}`, cursor: "pointer", fontSize: 8.5, color: C.muted, fontWeight: 600 }}>
+                                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="4.5" stroke="currentColor" strokeWidth="1"/><path d="M5 2.5v5M2.5 5h5" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/></svg>
+                                    Add Photo
+                                    <input type="file" accept="image/*" multiple style={{ display: "none" }} onChange={e => {
+                                      const files = Array.from(e.target.files ?? []).map(f => f.name)
+                                      if (files.length) setStep7Rows(rs => rs.map(r => r.id === row.id ? { ...r, images: [...(r.images ?? []), ...files] } : r))
+                                      e.target.value = ""
+                                    }} />
+                                  </label>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                      <button onClick={() => {
+                        const above = step7Rows[step7Rows.length - 2] // last before END
+                        const endIdx = step7Rows.findIndex(r => r.isEnd)
+                        const newRow: CharRow = { id: `chr${Date.now()}`, length: "", depth: above?.depth ?? "", aboveGround: above?.aboveGround ?? "", ownership: above ? ownershipFor(above.aboveGround) : "Association" }
+                        setStep7Rows(rs => { const c = [...rs]; c.splice(endIdx, 0, newRow); return c })
+                      }} style={{ padding: "7px", fontSize: 10, fontWeight: 700, background: C.card, color: C.cyan, border: `1.5px solid ${C.cyan}44`, borderRadius: 5, cursor: "pointer" }}>+ Add change</button>
+                      <button
+                        disabled={step7Rows.some(r => !r.length || !r.depth || !r.aboveGround)}
+                        onClick={() => {
+                          updateVideo({ characteristics: step7Rows, inspStep: 8 })
+                          setEditingStep(null)
+                        }}
+                        style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, borderRadius: 6, cursor: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "pointer" : "default", background: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "#00803E" : C.card, color: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
+                      >
+                        Finish Inspection ✓
+                      </button>
+                    </div>
+                  )}
+                  {step >= 8 && !isActive(7) && (
+                    <div style={{ padding: "10px 16px 14px", textAlign: "center" }}>
+                      <div style={{ padding: "10px 14px", borderRadius: 7, background: "#E8F4EF", border: "1px solid #00803E44", fontSize: 11, fontWeight: 700, color: "#00803E" }}>✓ Inspection complete</div>
+                    </div>
+                  )}
+                </div>
+
               </div>
-            )}
+              )
+            })()}
           {/* Delete pipe at bottom */}
           <div style={{ marginTop: "auto", padding: "12px 16px 16px", borderTop: `1px solid ${C.border}`, flexShrink: 0 }}>
             <button onClick={() => deletePipe(selectedPipe.id)} style={{ width: "100%", padding: "8px", fontSize: 10.5, fontWeight: 700, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 5, cursor: "pointer", letterSpacing: "0.04em" }}>
@@ -3807,6 +4492,7 @@ export default function App() {
           </div>
         </div>
         )}
+        </div>{/* end inner panel wrapper */}
       </div>
 
       {/* ── INSPECTION FULLSCREEN OVERLAY ────────────────────────────────────── */}
