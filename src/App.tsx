@@ -39,7 +39,8 @@ interface Asset {
   locationOther?: string
   // Basin
   depth?: string
-  conditionRating?: 1|2|3|4|5
+  conditionRating?: 1|2|3|4|5|"unable"
+  conditionBlocker?: string
   // Cleanout
   accessSize?: string
   accessConfig?: string
@@ -211,8 +212,30 @@ const ASSET_PREFIX: Record<AssetType, string> = {
 const ALL_ASSET_TYPES = Object.keys(ASSET_META) as AssetType[]
 
 const LOCATION_OPTIONS = ["Basement","Hallway","Outside","Courtyard","Walkway","Front Yard","Unit","Laundry Room","Storage Room","Bike Room","Other"]
-const CONDITION_LABELS = ["","Minor","Light","Moderate","Severe","Urgent"]
+const CONDITION_LABELS = ["","Good","Fair","Poor","Failing","Critical"]
 const CONDITION_COLORS = ["","#00803E","#7DC242","#A96B00","#FF7A29","#CE1A74"]
+const CONDITION_DESCS = [
+  "",
+  "Structurally sound and functioning as intended. No significant deterioration, damage, or excessive buildup observed. Continue routine maintenance and monitoring.",
+  "Functional but shows moderate age-related wear, deterioration, buildup, or minor defects. No immediate structural repair is required, but maintenance and continued monitoring are recommended.",
+  "Significant deterioration, corrosion, cracking, damaged components, heavy buildup, or other conditions that may affect performance. Repair or rehabilitation should be planned.",
+  "Advanced deterioration or structural defects that significantly increase the likelihood of backup, leakage, collapse, or operational failure. Corrective work should be prioritised.",
+  "Severe structural deterioration, active failure, major damage, collapse risk, or another condition requiring immediate attention. Repair or replacement is recommended as soon as reasonably possible.",
+]
+const CONDITION_UNABLE_COLOR = "#5F6E7C"
+const CONDITION_BLOCKER_OPTIONS = [
+  "Full of debris", "Standing water", "Full of grease", "Heavy scale",
+  "Access limited — could not reach", "Access limited — could not open",
+  "Structurally unsafe to enter", "Other",
+]
+function conditionBlockerRec(blocker: string): string {
+  if (blocker === "Standing water") return "Pump"
+  if (blocker === "Full of grease" || blocker === "Heavy scale") return "Hydro-jetting"
+  if (blocker.startsWith("Access limited — could not reach")) return "Clean-out installation"
+  if (blocker.startsWith("Access limited — could not open")) return "Excavate to expose"
+  if (blocker === "Full of debris") return "Pump and clean"
+  return "Inspect and clear obstruction"
+}
 const CONN_OPTIONS = ["Tee","Wye","Sanitary Tee","90°","Unknown","Other"]
 
 // ── Sample data ────────────────────────────────────────────────────────────────
@@ -3110,31 +3133,84 @@ export default function App() {
 
             {/* ── Basin-specific ───────────────────────────────────────────── */}
             {["catch-basin","storm-basin","sanitary-basin"].includes(selectedAsset.type) && (
-              <>
-                <Section>
-                  <Label>Depth</Label>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <input type="number" value={selectedAsset.depth ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, depth: e.target.value } : a))}
-                      placeholder="0" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
-                    <span style={{ fontSize: 12, color: C.muted }}>ft</span>
-                  </div>
-                </Section>
-                <Section>
-                  <Label>Condition Rating</Label>
-                  <div style={{ display: "flex", gap: 5 }}>
-                    {([1,2,3,4,5] as const).map(r => {
-                      const sel = selectedAsset.conditionRating === r
-                      return (
-                        <button key={r} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, conditionRating: r } : a))}
-                          style={{ flex: 1, padding: "7px 4px", fontSize: 8, fontWeight: 700, textAlign: "center", borderRadius: 5, cursor: "pointer", background: sel ? CONDITION_COLORS[r] : "#fff", color: sel ? "#fff" : CONDITION_COLORS[r], border: `1.5px solid ${CONDITION_COLORS[r]}` }}>
-                          {r}<br />{CONDITION_LABELS[r]}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </Section>
-              </>
+              <Section>
+                <Label>Depth</Label>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="number" value={selectedAsset.depth ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, depth: e.target.value } : a))}
+                    placeholder="0" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
+                  <span style={{ fontSize: 12, color: C.muted }}>ft</span>
+                </div>
+              </Section>
             )}
+
+            {/* ── Condition Rating — all asset types ───────────────────────── */}
+            <Section>
+              <Label>Condition Rating</Label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {([1,2,3,4,5] as const).map(r => {
+                  const sel = selectedAsset.conditionRating === r
+                  const col = CONDITION_COLORS[r]
+                  return (
+                    <button key={r} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, conditionRating: r, conditionBlocker: undefined } : a))}
+                      style={{ display: "flex", alignItems: "flex-start", gap: 0, padding: 0, background: sel ? col + "12" : C.card, border: `1.5px solid ${sel ? col : C.border}`, borderRadius: 7, cursor: "pointer", textAlign: "left", overflow: "hidden" }}>
+                      <div style={{ width: 4, alignSelf: "stretch", background: col, flexShrink: 0 }} />
+                      <div style={{ padding: "9px 11px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 3 }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: sel ? col : C.text }}>{CONDITION_LABELS[r]}</span>
+                          <span style={{ fontSize: 9, fontFamily: "JetBrains Mono", color: sel ? col : C.muted, fontWeight: 700 }}>{r}</span>
+                        </div>
+                        <div style={{ fontSize: 9.5, color: sel ? "#38424E" : C.dim, lineHeight: 1.45 }}>{CONDITION_DESCS[r]}</div>
+                      </div>
+                    </button>
+                  )
+                })}
+                {/* Divider + Unable option */}
+                <div style={{ height: 1, background: C.border, margin: "4px 0" }} />
+                {(() => {
+                  const sel = selectedAsset.conditionRating === "unable"
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <button onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, conditionRating: "unable" } : a))}
+                        style={{ display: "flex", alignItems: "flex-start", gap: 0, padding: 0, background: sel ? CONDITION_UNABLE_COLOR + "12" : C.card, border: `1.5px solid ${sel ? CONDITION_UNABLE_COLOR : C.border}`, borderRadius: 7, cursor: "pointer", textAlign: "left", overflow: "hidden" }}>
+                        <div style={{ width: 4, alignSelf: "stretch", background: CONDITION_UNABLE_COLOR, flexShrink: 0 }} />
+                        <div style={{ padding: "9px 11px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 3 }}>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: sel ? CONDITION_UNABLE_COLOR : C.text }}>Unable to fully evaluate</span>
+                            <span style={{ fontSize: 9, fontFamily: "JetBrains Mono", color: C.muted, fontWeight: 700 }}>—</span>
+                          </div>
+                          <div style={{ fontSize: 9.5, color: sel ? "#38424E" : C.dim, lineHeight: 1.45 }}>Condition could not be completely determined due to standing water, debris, grease, access limitations, or another obstruction. Cleaning, pumping, or additional investigation is recommended before assigning a final condition.</div>
+                        </div>
+                      </button>
+                      {sel && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", background: CONDITION_UNABLE_COLOR + "0D", border: `1px solid ${CONDITION_UNABLE_COLOR}33`, borderRadius: 6 }}>
+                          <div>
+                            <FieldLabel text="WHAT PREVENTED ASSESSMENT *" />
+                            <select value={selectedAsset.conditionBlocker ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, conditionBlocker: e.target.value } : a))}
+                              style={{ ...inputSt, paddingRight: 8 }}>
+                              <option value="">— select —</option>
+                              {CONDITION_BLOCKER_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                            </select>
+                          </div>
+                          {selectedAsset.conditionBlocker && (
+                            <div style={{ padding: "10px 12px", borderRadius: 5, background: C.card, border: `1px solid ${C.border}` }}>
+                              <div style={{ fontSize: 9.5, color: C.muted, lineHeight: 1.5, fontStyle: "italic", marginBottom: 8 }}>This asset could not be assessed. Add a recommendation to clear it?</div>
+                              <button
+                                onClick={() => {
+                                  const rec = conditionBlockerRec(selectedAsset.conditionBlocker ?? "")
+                                  alert(`Recommendation pre-filled:\n\nAction: ${rec}\nPriority: Immediate\nRationale: Condition could not be assessed — ${selectedAsset.conditionBlocker}. Clearing required before a grade can be assigned.`)
+                                }}
+                                style={{ padding: "6px 12px", fontSize: 10, fontWeight: 700, background: CONDITION_UNABLE_COLOR, color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: "pointer" }}>
+                                Add recommendation
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
+              </div>
+            </Section>
 
             {/* ── Cleanout-specific ────────────────────────────────────────── */}
             {["cleanout-floor","cleanout-stack","cleanout-foundation","cleanout-overhead"].includes(selectedAsset.type) && (
