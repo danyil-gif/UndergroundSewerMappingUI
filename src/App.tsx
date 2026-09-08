@@ -401,30 +401,204 @@ function FieldLabel({ text, pricing }: { text: string; pricing?: boolean }) {
   )
 }
 
-function FootageRow({ footage, footageTo, onChange, onChangeTo }: {
+// Parse decimal feet string → { ft, inches }
+function parseFtIn(val: string): { ft: number; inches: number } {
+  const f = parseFloat(val) || 0
+  const ft = Math.floor(Math.max(0, f))
+  const inches = Math.min(11, Math.round((f - ft) * 12))
+  return { ft, inches }
+}
+// Format { ft, inches } → display string like  23' 8"
+function fmtFtIn(val: string): string {
+  const { ft, inches } = parseFtIn(val)
+  return inches === 0 ? `${ft}'` : `${ft}' ${inches}"`
+}
+
+function WheelPicker({ value, onChange, max = 200 }: {
+  value: string; onChange: (v: string) => void; max?: number
+}) {
+  const ITEM_H = 36
+  const VISIBLE = 5
+  const BG = "#16202A"
+
+  const { ft: currentFt, inches: currentIn } = parseFtIn(value)
+
+  const ftRef = useRef<HTMLDivElement>(null)
+  const inRef = useRef<HTMLDivElement>(null)
+  const ftLock = useRef(false)
+  const inLock = useRef(false)
+  const ftTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const scrollTo = (el: HTMLDivElement | null, idx: number, lock: React.MutableRefObject<boolean>) => {
+    if (!el) return
+    lock.current = true
+    el.scrollTop = idx * ITEM_H
+    setTimeout(() => { lock.current = false }, 160)
+  }
+
+  useEffect(() => { scrollTo(ftRef.current, currentFt, ftLock) }, [currentFt])
+  useEffect(() => { scrollTo(inRef.current, currentIn, inLock) }, [currentIn])
+
+  const emit = () => {
+    const ftEl = ftRef.current
+    const inEl = inRef.current
+    if (!ftEl || !inEl) return
+    const ft = Math.max(0, Math.min(max, Math.round(ftEl.scrollTop / ITEM_H)))
+    const inches = Math.max(0, Math.min(11, Math.round(inEl.scrollTop / ITEM_H)))
+    onChange(String(ft + inches / 12))
+  }
+
+  const onFtScroll = () => {
+    if (ftLock.current) return
+    if (ftTimer.current) clearTimeout(ftTimer.current)
+    ftTimer.current = setTimeout(emit, 90)
+  }
+  const onInScroll = () => {
+    if (inLock.current) return
+    if (inTimer.current) clearTimeout(inTimer.current)
+    inTimer.current = setTimeout(emit, 90)
+  }
+
+  const feetItems = Array.from({ length: max + 1 }, (_, i) => i)
+  const inchItems = Array.from({ length: 12 }, (_, i) => i)
+  const viewH = ITEM_H * VISIBLE
+
+  const colScroll = (
+    items: number[], ref: React.RefObject<HTMLDivElement | null>,
+    current: number, onScroll: () => void, unit: string
+  ) => (
+    <div style={{ flex: 1, height: viewH, overflow: "hidden" }}>
+      <div ref={ref} onScroll={onScroll} style={{
+        width: "calc(100% + 18px)", height: "100%",
+        overflowY: "scroll", scrollSnapType: "y mandatory",
+        scrollPaddingTop: ITEM_H * 2, paddingTop: ITEM_H * 2, paddingBottom: ITEM_H * 2,
+        boxSizing: "content-box",
+      }}>
+        {items.map(n => {
+          const sel = n === current
+          return (
+            <div key={n} style={{
+              height: ITEM_H, display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
+              scrollSnapAlign: "start", userSelect: "none",
+              color: sel ? "#ffffff" : "rgba(255,255,255,0.18)",
+              transition: "color 0.1s",
+            }}>
+              <span style={{ fontSize: sel ? 22 : 16, fontWeight: sel ? 700 : 400, fontFamily: "JetBrains Mono", lineHeight: 1 }}>{n}</span>
+              {sel && <span style={{ fontSize: 12, fontWeight: 500, color: "rgba(255,255,255,0.6)", fontFamily: "JetBrains Mono" }}>{unit}</span>}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+
+  return (
+    <div style={{ position: "relative", display: "flex", width: 148, height: viewH, borderRadius: 10, overflow: "hidden", background: BG }}>
+      {/* Selection band */}
+      <div style={{ position: "absolute", top: ITEM_H * 2, left: 0, right: 0, height: ITEM_H, background: "rgba(255,255,255,0.1)", borderRadius: 6, zIndex: 1, pointerEvents: "none" }} />
+      {/* Top fade */}
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: ITEM_H * 1.7, background: `linear-gradient(to bottom, ${BG}, transparent)`, zIndex: 2, pointerEvents: "none" }} />
+      {/* Bottom fade */}
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: ITEM_H * 1.7, background: `linear-gradient(to top, ${BG}, transparent)`, zIndex: 2, pointerEvents: "none" }} />
+      {colScroll(feetItems, ftRef, currentFt, onFtScroll, "ft")}
+      <div style={{ width: 1, background: "rgba(255,255,255,0.07)", margin: "10px 0", zIndex: 3 }} />
+      {colScroll(inchItems, inRef, currentIn, onInScroll, '"')}
+    </div>
+  )
+}
+
+function FootageRow({ footage, footageTo, onChange, onChangeTo, max }: {
   footage: string; footageTo?: string
   onChange: (v: string) => void; onChangeTo?: (v: string) => void
+  max?: number
 }) {
+  const [open, setOpen] = useState<"from" | "to" | null>(null)
+  const [popY, setPopY] = useState(0)
+  const [popX, setPopX] = useState(0)
+  const [toTouched, setToTouched] = useState(false)
+  const fromRef = useRef<HTMLButtonElement>(null)
+  const toRef = useRef<HTMLButtonElement>(null)
+
+  const handleFromChange = (v: string) => {
+    onChange(v)
+    if (!toTouched && onChangeTo) onChangeTo(v)
+  }
+  const handleToChange = (v: string) => {
+    setToTouched(true)
+    onChangeTo?.(v)
+  }
+
+  const openPicker = (which: "from" | "to") => {
+    const btn = which === "from" ? fromRef.current : toRef.current
+    if (btn) {
+      const r = btn.getBoundingClientRect()
+      setPopX(r.left + r.width / 2)
+      setPopY(r.top)
+    }
+    setOpen(which)
+  }
+
+  const chipSt: React.CSSProperties = {
+    padding: "5px 11px", fontSize: 13, fontWeight: 700, fontFamily: "JetBrains Mono",
+    background: "#F8FAFC", color: "#16202A",
+    border: "1.5px solid #D2DAE2", borderRadius: 6, cursor: "pointer",
+    letterSpacing: "-0.01em", lineHeight: 1,
+  }
+
+  const POPUP_H = 36 * 5 + 44  // wheel height + button + padding
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <div style={{ fontSize: 9, fontWeight: 600, color: "#5F6E7C", letterSpacing: "0.09em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
           {onChangeTo !== undefined ? "FROM *" : "FOOTAGE *"}
         </div>
-        <input type="number" value={footage} onChange={e => onChange(e.target.value)} style={{ ...inputSt, width: 58, textAlign: "center" }} />
-        {[5, 10, 25].map(d => (
-          <button key={d} onClick={() => onChange(String((parseFloat(footage || "0") + d).toFixed(0)))} style={{ padding: "4px 6px", fontSize: 9, fontWeight: 600, background: "#fff", color: "#5F6E7C", border: "1px solid #D2DAE2", borderRadius: 3, cursor: "pointer", fontFamily: "JetBrains Mono" }}>+{d}</button>
-        ))}
+        <button ref={fromRef} onClick={() => openPicker("from")} style={{ ...chipSt, borderColor: open === "from" ? "#00803E" : "#D2DAE2", background: open === "from" ? "#F0FAF5" : "#F8FAFC" }}>
+          {fmtFtIn(footage || "0")}
+        </button>
         {onChangeTo !== undefined && (
           <>
-            <span style={{ fontSize: 11, color: "#94A3B8", margin: "0 1px" }}>→</span>
+            <span style={{ fontSize: 11, color: "#CBD5E1" }}>→</span>
             <div style={{ fontSize: 9, fontWeight: 600, color: "#5F6E7C", letterSpacing: "0.09em", textTransform: "uppercase" }}>TO</div>
-            <input type="number" value={footageTo ?? ""} onChange={e => onChangeTo(e.target.value)} placeholder="end ft" style={{ ...inputSt, width: 58, textAlign: "center" }} />
+            <button ref={toRef} onClick={() => openPicker("to")} style={{ ...chipSt, borderColor: open === "to" ? "#00803E" : "#D2DAE2", background: open === "to" ? "#F0FAF5" : "#F8FAFC" }}>
+              {fmtFtIn(footageTo || footage || "0")}
+            </button>
           </>
         )}
-        <span style={{ fontSize: 10, color: "#94A3B8" }}>ft</span>
       </div>
-    </div>
+
+      {open && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 9990 }} onClick={() => setOpen(null)}>
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: "absolute",
+              left: Math.min(popX - 74, window.innerWidth - 160),
+              top: Math.max(8, popY - POPUP_H - 10),
+              width: 148,
+              background: "#16202A",
+              borderRadius: 14,
+              overflow: "hidden",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.45)",
+              display: "flex", flexDirection: "column",
+            }}
+          >
+            <div style={{ padding: "10px 0 6px", textAlign: "center", fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.4)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              {open === "from" ? (onChangeTo !== undefined ? "From" : "Footage") : "To"}
+            </div>
+            <WheelPicker
+              value={open === "from" ? (footage || "0") : (footageTo || footage || "0")}
+              onChange={v => { open === "from" ? handleFromChange(v) : handleToChange(v) }}
+              max={max}
+            />
+            <button onClick={() => setOpen(null)} style={{ margin: "8px 10px 10px", padding: "8px", background: "#00803E", color: "#fff", border: "none", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -3087,7 +3261,7 @@ export default function App() {
                   onClick={() => setShowVideoForm(v => !v)}
                   style={{ padding: "3px 9px", fontSize: 9.5, background: "#00803E18", color: "#00803E", border: "1px solid #00803E44", borderRadius: 4, cursor: "pointer", fontWeight: 700, letterSpacing: "0.04em" }}
                 >
-                  + ADD VIDEO
+                  + CAMERA INSPECTION
                 </button>
               </div>
               {showVideoForm && (
@@ -3123,7 +3297,7 @@ export default function App() {
                 </div>
               )}
               {selectedPipe.videos.length === 0 && !showVideoForm && (
-                <div style={{ fontSize: 11, color: C.dim, fontStyle: "italic", paddingBottom: 4 }}>No camera runs yet. Click "+ Add Video" to upload footage and begin logging.</div>
+                <div style={{ fontSize: 11, color: C.dim, fontStyle: "italic", paddingBottom: 4 }}>No camera inspections yet. Click "+ Camera Inspection" to upload footage and begin logging.</div>
               )}
               {selectedPipe.videos.map(video => {
                 const isOpen = selectedVideoId === video.id
