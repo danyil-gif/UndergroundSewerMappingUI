@@ -184,6 +184,86 @@ interface Observation {
   cippNotes?: string
 }
 
+// ── Session / visit types ─────────────────────────────────────────────────────
+
+interface VisitLogEntry {
+  id: string
+  timestamp: number
+  message: string
+  recordId?: string
+  recordType?: "asset" | "pipe" | "video" | "observation"
+}
+
+interface SiteVisit {
+  id: string
+  jobId: string | null
+  jobNumber?: string
+  visitType: string
+  technicians: string[]
+  startedAt: number
+  closedAt?: number
+  changes: VisitLogEntry[]
+  officeUpdateReason?: string
+  visitNote?: string
+}
+
+interface SitePerson {
+  id: string
+  name: string
+  role: string
+}
+
+interface SiteContact {
+  id: string
+  name: string
+  role: string
+  phone?: string
+  email?: string
+  bestContact?: string
+  notes?: string
+}
+
+interface LogisticsEntry {
+  id: string
+  category: string
+  note?: string
+  visitId?: string
+  addedBy?: string
+}
+
+const SITE_PERSONS: SitePerson[] = [
+  { id: "p-dino",      name: "Dino",      role: "Manager" },
+  { id: "p-nicholas",  name: "Nicholas",  role: "Technician" },
+  { id: "p-alexis",    name: "Alexis",    role: "Technician" },
+  { id: "p-christian", name: "Christian", role: "Project Lead" },
+  { id: "p-joshua",    name: "Joshua",    role: "Sales" },
+]
+
+const SAMPLE_JOBS = [
+  { id: "j1", group: "TODAY",     date: "8:40 AM",  number: "#48812", type: "Emergency",     summary: "Sewer backup, Bldg 3 laundry", visitType: "Emergency Call" },
+  { id: "j2", group: "SCHEDULED", date: "Mar 22",   number: "#48901", type: "Reserve study", summary: "Full property survey",          visitType: "Sewer Infrastructure Master Plan" },
+  { id: "j3", group: "RECENT",    date: "Mar 08",   number: "#48770", type: "Diagnostic",    summary: "Slow drains, Bldg 1",          visitType: "Diagnostic Site Visit" },
+]
+
+const VISIT_TYPES = [
+  "Diagnostic Site Visit", "Emergency Call", "Hydro-Jetting Estimate Survey",
+  "Hydro-Jetting", "Rodding / Cable Machine", "Descaling", "CIPP Feasibility",
+  "CIPP Installation", "Excavation", "Post-Repair Verification",
+  "Sewer Infrastructure Master Plan", "Office Update", "Other",
+]
+
+const LOGISTICS_CATEGORIES = [
+  "Parking & truck staging", "Building access", "Lockbox and keys",
+  "Basement or mechanical access", "Utility shutoffs", "Excavation staging",
+  "Restoration reference", "Hazards and constraints",
+]
+
+const CONTACT_ROLES = [
+  "Property manager", "On-site maintenance", "Board president", "Board member", "After-hours", "Other",
+]
+
+const CONTACT_METHODS = ["Call", "Text", "Email"]
+
 // ── Asset type metadata ────────────────────────────────────────────────────────
 
 const ASSET_META: Record<AssetType, { label: string; abbr: string; shape: "circle"|"square"|"diamond"|"triangle"|"hexagon"; group: string }> = {
@@ -1112,8 +1192,52 @@ export default function App() {
   const [step7Rows, setStep7Rows] = useState<CharRow[]>([])
   const [charRowEditing, setCharRowEditing] = useState<string | null>(null)
 
+  // ── Session / visit state ──────────────────────────────────────────────────
+  const [currentVisit, setCurrentVisit] = useState<SiteVisit | null>(null)
+  const [visitHistory, setVisitHistory] = useState<SiteVisit[]>([])
+  const [selectedPersonId, setSelectedPersonId] = useState("p-nicholas")
+  const [showPersonPicker, setShowPersonPicker] = useState(false)
+  const [showStartVisit, setShowStartVisit] = useState(false)
+  const [showCloseVisit, setShowCloseVisit] = useState(false)
+  const [showVisitLog, setShowVisitLog] = useState(false)
+  const [visitLogHighlight, setVisitLogHighlight] = useState(false)
+  const [startVisitForm, setStartVisitForm] = useState({ jobId: "", visitType: "", technicians: ["p-nicholas"] as string[], officeMode: false, officeReason: "" })
+  const [closeVisitNote, setCloseVisitNote] = useState("")
+  const [acceptedItems, setAcceptedItems] = useState<Record<string, string>>({})
+  const [elapsed, setElapsed] = useState(0)
+  const [leftSectionVisits, setLeftSectionVisits] = useState(false)
+  const [viewingHistoryVisitId, setViewingHistoryVisitId] = useState<string | null>(null)
+  // Site logistics + contacts
+  const [logistics, setLogistics] = useState<LogisticsEntry[]>([])
+  const [contacts, setContacts] = useState<SiteContact[]>([])
+  const [showAddLogistics, setShowAddLogistics] = useState(false)
+  const [logisticsForm, setLogisticsForm] = useState({ category: "", note: "" })
+  const [showAddContact, setShowAddContact] = useState(false)
+  const [contactForm, setContactForm] = useState<Omit<SiteContact, "id">>({ name: "", role: "", phone: "", email: "", bestContact: "", notes: "" })
+
   const mapRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // ── Force view mode when no visit is open ────────────────────────────────────
+  useEffect(() => {
+    if (!currentVisit && mode !== "view") setMode("view")
+  }, [currentVisit, mode])
+
+  // ── Elapsed timer for active visit ───────────────────────────────────────────
+  useEffect(() => {
+    if (!currentVisit) return
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - currentVisit.startedAt) / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [currentVisit])
+
+  // Visit log append helper
+  function appendLog(message: string, extra?: Pick<VisitLogEntry, "recordId" | "recordType">) {
+    if (!currentVisit) return
+    const entry: VisitLogEntry = { id: Math.random().toString(36).slice(2), timestamp: Date.now(), message, ...extra }
+    setCurrentVisit(v => v ? { ...v, changes: [...v.changes, entry] } : v)
+    setVisitLogHighlight(true)
+    setTimeout(() => setVisitLogHighlight(false), 1800)
+  }
 
   // ── Map zoom/pan via wheel and touch ─────────────────────────────────────────
   useEffect(() => {
@@ -1769,6 +1893,53 @@ export default function App() {
   }
 
   // ── Render ───────────────────────────────────────────────────────────────────
+  const canEdit = currentVisit !== null
+  const selectedPerson = SITE_PERSONS.find(p => p.id === selectedPersonId) ?? SITE_PERSONS[1]
+
+  // Elapsed formatting
+  const elapsedH = Math.floor(elapsed / 3600)
+  const elapsedM = Math.floor((elapsed % 3600) / 60)
+  const elapsedStr = `${String(elapsedH).padStart(2, "0")}:${String(elapsedM).padStart(2, "0")}`
+
+  // History visit being viewed in log dropdown
+  const historyVisit = viewingHistoryVisitId ? visitHistory.find(v => v.id === viewingHistoryVisitId) ?? null : null
+
+  // Log to show in dropdown: current or history
+  const logToShow = historyVisit ?? currentVisit
+
+  // Tooltip for disabled controls
+  const disabledTitle = "Start a visit to make changes."
+  const disabledStyle = { opacity: 0.45, pointerEvents: "none" as const, cursor: "not-allowed" as const }
+
+  function startVisit() {
+    const form = startVisitForm
+    const job = SAMPLE_JOBS.find(j => j.id === form.jobId)
+    const visit: SiteVisit = {
+      id: Math.random().toString(36).slice(2),
+      jobId: form.jobId || null,
+      jobNumber: job?.number,
+      visitType: form.visitType,
+      technicians: form.technicians,
+      startedAt: Date.now(),
+      changes: [{ id: "init", timestamp: Date.now(), message: "Visit started" }],
+      officeUpdateReason: form.officeMode ? form.officeReason : undefined,
+    }
+    setCurrentVisit(visit)
+    setElapsed(0)
+    setShowStartVisit(false)
+    setStartVisitForm({ jobId: "", visitType: "", technicians: ["p-nicholas"], officeMode: false, officeReason: "" })
+  }
+
+  function closeVisit() {
+    if (!currentVisit) return
+    const closed: SiteVisit = { ...currentVisit, closedAt: Date.now(), visitNote: closeVisitNote }
+    setVisitHistory(h => [closed, ...h])
+    setCurrentVisit(null)
+    setShowCloseVisit(false)
+    setCloseVisitNote("")
+    setAcceptedItems({})
+    setElapsed(0)
+  }
 
   const activeView = activeTabId !== "main" ? (mapViews.find(v => v.id === activeTabId) ?? null) : null
   const selectedView = selectedViewId && !selectedAssetId && !selectedPipeId
@@ -1801,12 +1972,298 @@ export default function App() {
 
   return (
     <div
-      style={{ height: "100dvh", display: "flex", overflow: "hidden", background: C.bg, color: C.text, fontFamily: "'DM Sans', sans-serif", userSelect: "none" }}
+      style={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden", background: C.bg, color: C.text, fontFamily: "'DM Sans', sans-serif", userSelect: "none" }}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onTouchMove={e => { const { clientX, clientY } = getTouchXY(e); handleMouseMove({ clientX, clientY } as React.MouseEvent) }}
       onTouchEnd={handleMouseUp}
     >
+
+      {/* ── SESSION STRIP ─────────────────────────────────────────────────────── */}
+      <div style={{ height: 44, minHeight: 44, display: "flex", alignItems: "center", paddingLeft: 16, paddingRight: 12, gap: 10, background: currentVisit ? C.cyan + "18" : C.panel, borderBottom: `1px solid ${C.border}`, position: "relative", zIndex: 60, flexShrink: 0 }}>
+        {/* Status dot when active */}
+        {currentVisit && (
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.cyan, flexShrink: 0, animation: "pulse 2s ease-in-out infinite" }} />
+        )}
+        {/* Property / visit info */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10 }}>
+          {currentVisit ? (
+            <>
+              <span style={{ fontSize: 13, fontWeight: 600, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                Willow Creek · {currentVisit.visitType}
+              </span>
+              <span style={{ fontFamily: "JetBrains Mono", fontSize: 12, color: C.cyan, flexShrink: 0 }}>{elapsedStr}</span>
+              <button
+                onClick={() => { setShowVisitLog(v => !v); setViewingHistoryVisitId(null) }}
+                style={{ display: "flex", alignItems: "center", gap: 4, border: "none", cursor: "pointer", padding: "2px 6px", borderRadius: 4, background: visitLogHighlight ? C.cyan + "22" : "transparent", transition: "background 0.3s" }}
+              >
+                <span style={{ fontSize: 11, color: visitLogHighlight ? C.cyan : C.muted, fontFamily: "JetBrains Mono", fontWeight: 700, transition: "color 0.3s" }}>
+                  {currentVisit.changes.length} changes
+                </span>
+                <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1 3l3.5 3.5L8 3" stroke={visitLogHighlight ? C.cyan : C.muted} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
+            </>
+          ) : (
+            <>
+              <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Willow Creek Condominium Association</span>
+              <span style={{ fontSize: 9.5, fontFamily: "JetBrains Mono", fontWeight: 700, color: C.muted, background: C.card, border: `1px solid ${C.border}`, borderRadius: 4, padding: "2px 7px", letterSpacing: "0.06em" }}>READ-ONLY</span>
+            </>
+          )}
+        </div>
+        {/* Action button */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+          {currentVisit ? (
+            <button
+              onClick={() => setShowCloseVisit(v => !v)}
+              style={{ padding: "6px 14px", fontSize: 11, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", letterSpacing: "0.04em" }}
+            >Close visit</button>
+          ) : (
+            <button
+              onClick={() => setShowStartVisit(v => !v)}
+              style={{ padding: "6px 14px", fontSize: 11, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", letterSpacing: "0.04em" }}
+            >Start visit</button>
+          )}
+          {/* Person picker */}
+          <div style={{ position: "relative" }}>
+            <button
+              onClick={() => setShowPersonPicker(v => !v)}
+              style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 9px", fontSize: 11, fontWeight: 600, background: showPersonPicker ? C.card : "transparent", border: `1px solid ${showPersonPicker ? C.border : "transparent"}`, borderRadius: 5, cursor: "pointer", color: C.text }}
+            >
+              {selectedPerson.name}
+              <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1 3l3.5 3.5L8 3" stroke={C.muted} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </button>
+            {showPersonPicker && (
+              <div style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, width: 200, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 7, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 200, overflow: "hidden" }}>
+                {SITE_PERSONS.map(p => (
+                  <button key={p.id} onClick={() => { setSelectedPersonId(p.id); setShowPersonPicker(false) }}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", padding: "9px 14px", background: selectedPersonId === p.id ? C.cyan + "12" : "transparent", border: "none", cursor: "pointer", textAlign: "left" }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: selectedPersonId === p.id ? C.cyan : C.text }}>{p.name}</span>
+                    <span style={{ fontSize: 10, color: C.muted }}>{p.role}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── Start visit popover ──────────────────────────────────────────────── */}
+        {showStartVisit && (
+          <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 60, width: 380, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 12px 36px rgba(0,0,0,0.14)", zIndex: 200, overflow: "hidden" }}>
+            <div style={{ padding: "14px 16px 10px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>Start visit</span>
+              <button onClick={() => setShowStartVisit(false)} style={{ background: "none", border: "none", cursor: "pointer", color: C.dim, fontSize: 16, lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+              {!startVisitForm.officeMode ? (
+                <>
+                  {/* Job selector */}
+                  <div>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>Job *</div>
+                    {["TODAY","SCHEDULED","RECENT"].map(grp => {
+                      const jobs = SAMPLE_JOBS.filter(j => j.group === grp)
+                      return (
+                        <div key={grp}>
+                          <div style={{ fontSize: 8.5, fontWeight: 700, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", padding: "4px 0 2px" }}>{grp}</div>
+                          {jobs.map(j => {
+                            const sel = startVisitForm.jobId === j.id
+                            return (
+                              <button key={j.id} onClick={() => setStartVisitForm(f => ({ ...f, jobId: j.id, visitType: j.visitType }))}
+                                style={{ width: "100%", display: "flex", gap: 8, alignItems: "baseline", padding: "7px 10px", marginBottom: 3, borderRadius: 5, background: sel ? C.cyan + "12" : C.card, border: `1px solid ${sel ? C.cyan : C.border}`, cursor: "pointer", textAlign: "left" }}>
+                                <span style={{ fontSize: 9.5, color: C.dim, fontFamily: "JetBrains Mono", flexShrink: 0, width: 44 }}>{j.date}</span>
+                                <span style={{ fontSize: 9.5, fontWeight: 700, color: sel ? C.cyan : C.text, fontFamily: "JetBrains Mono", flexShrink: 0, width: 48 }}>{j.number}</span>
+                                <span style={{ fontSize: 9.5, color: C.muted, flexShrink: 0, width: 70 }}>{j.type}</span>
+                                <span style={{ fontSize: 9.5, color: C.dim }}>{j.summary}</span>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {/* Visit type */}
+                  <div>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 5 }}>Visit type *</div>
+                    <select value={startVisitForm.visitType} onChange={e => setStartVisitForm(f => ({ ...f, visitType: e.target.value }))}
+                      style={{ width: "100%", padding: "7px 9px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none" }}>
+                      <option value="">— select —</option>
+                      {VISIT_TYPES.map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </div>
+                  {/* Technicians */}
+                  <div>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 5 }}>Technicians *</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      {SITE_PERSONS.map(p => {
+                        const sel = startVisitForm.technicians.includes(p.id)
+                        return (
+                          <button key={p.id} onClick={() => setStartVisitForm(f => ({ ...f, technicians: sel ? f.technicians.filter(t => t !== p.id) : [...f.technicians, p.id] }))}
+                            style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 5, background: sel ? C.cyan + "12" : C.card, border: `1px solid ${sel ? C.cyan : C.border}`, cursor: "pointer", textAlign: "left" }}>
+                            <div style={{ width: 14, height: 14, borderRadius: 3, background: sel ? C.cyan : C.card, border: `1.5px solid ${sel ? C.cyan : C.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                              {sel && <svg width="8" height="8" viewBox="0 0 8 8"><path d="M1 4l2 2 4-4" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" /></svg>}
+                            </div>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: sel ? C.cyan : C.text }}>{p.name}</span>
+                            <span style={{ fontSize: 10, color: C.muted }}>{p.role}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Office update mode */}
+                  <div>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 5 }}>Reason for change *</div>
+                    <textarea value={startVisitForm.officeReason} onChange={e => setStartVisitForm(f => ({ ...f, officeReason: e.target.value }))}
+                      rows={4} placeholder="Describe the office update…"
+                      style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
+                    <div style={{ fontSize: 9.5, color: C.muted, marginTop: 6, fontStyle: "italic", lineHeight: 1.5 }}>Recorded as an office correction, not a field observation, and labelled as such in any report.</div>
+                  </div>
+                  {/* Technicians for office update */}
+                  <div>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 5 }}>Technicians *</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      {SITE_PERSONS.map(p => {
+                        const sel = startVisitForm.technicians.includes(p.id)
+                        return (
+                          <button key={p.id} onClick={() => setStartVisitForm(f => ({ ...f, technicians: sel ? f.technicians.filter(t => t !== p.id) : [...f.technicians, p.id] }))}
+                            style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 5, background: sel ? C.cyan + "12" : C.card, border: `1px solid ${sel ? C.cyan : C.border}`, cursor: "pointer", textAlign: "left" }}>
+                            <div style={{ width: 14, height: 14, borderRadius: 3, background: sel ? C.cyan : C.card, border: `1.5px solid ${sel ? C.cyan : C.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                              {sel && <svg width="8" height="8" viewBox="0 0 8 8"><path d="M1 4l2 2 4-4" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" /></svg>}
+                            </div>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: sel ? C.cyan : C.text }}>{p.name}</span>
+                            <span style={{ fontSize: 10, color: C.muted }}>{p.role}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+              {/* Start / cancel */}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={startVisit}
+                  disabled={startVisitForm.officeMode ? startVisitForm.technicians.length === 0 || !startVisitForm.officeReason.trim() : !startVisitForm.jobId || !startVisitForm.visitType || startVisitForm.technicians.length === 0}
+                  style={{ flex: 1, padding: "9px", fontSize: 11, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 5, cursor: "pointer", opacity: (startVisitForm.officeMode ? startVisitForm.technicians.length === 0 || !startVisitForm.officeReason.trim() : !startVisitForm.jobId || !startVisitForm.visitType || startVisitForm.technicians.length === 0) ? 0.45 : 1 }}
+                >Start visit</button>
+                <button onClick={() => setShowStartVisit(false)} style={{ padding: "9px 14px", fontSize: 11, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Cancel</button>
+              </div>
+              {/* Office update toggle */}
+              <button onClick={() => setStartVisitForm(f => ({ ...f, officeMode: !f.officeMode, jobId: f.officeMode ? "" : "", visitType: f.officeMode ? "" : "Office Update" }))}
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 10.5, color: C.muted, textDecoration: "underline", padding: 0, textAlign: "center" }}>
+                {startVisitForm.officeMode ? "← Back to job list" : "No job — office update"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Close visit popover ──────────────────────────────────────────────── */}
+        {showCloseVisit && currentVisit && (
+          <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 60, width: 460, maxHeight: "70vh", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 12px 36px rgba(0,0,0,0.14)", zIndex: 200, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ padding: "14px 16px 10px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>Close visit</span>
+              <button onClick={() => setShowCloseVisit(false)} style={{ background: "none", border: "none", cursor: "pointer", color: C.dim, fontSize: 16, lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ overflowY: "auto", flex: 1, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* Summary counts */}
+              <div style={{ padding: "10px 12px", background: C.card, borderRadius: 6, border: `1px solid ${C.border}`, fontSize: 11, color: C.muted, fontFamily: "JetBrains Mono" }}>
+                {assets.length} asset{assets.length !== 1 ? "s" : ""} · {pipes.length} pipe{pipes.length !== 1 ? "s" : ""} · {currentVisit.changes.length} log entries
+              </div>
+              {/* Log entries */}
+              <div>
+                <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>Visit log</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  {currentVisit.changes.map(e => {
+                    const d = new Date(e.timestamp)
+                    const t = `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`
+                    return (
+                      <div key={e.id} style={{ display: "flex", gap: 10, padding: "5px 0", borderBottom: `1px solid ${C.border}` }}>
+                        <span style={{ fontSize: 9.5, color: C.dim, fontFamily: "JetBrains Mono", flexShrink: 0, width: 36 }}>{t}</span>
+                        <span style={{ fontSize: 10.5, color: C.text }}>{e.message}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+              {/* Outstanding items */}
+              <div>
+                <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>Outstanding items</div>
+                {[
+                  { id: "oi-photos", record: `${assets.filter(a => true).length} assets`, field: "no photos", blocking: false },
+                ].map(item => (
+                  <div key={item.id} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "8px 10px", borderRadius: 5, background: C.card, border: `1px solid ${item.blocking ? "#FECACA" : C.border}`, marginBottom: 5 }}>
+                    <span style={{ fontSize: 14, flexShrink: 0 }}>{item.blocking ? "⚠" : "⚠"}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{item.record}</span>
+                        <span style={{ fontSize: 10, color: C.muted }}>{item.field}</span>
+                        {item.blocking && <span style={{ fontSize: 9, fontWeight: 700, color: "#DC2626", background: "#FEE2E2", padding: "1px 5px", borderRadius: 3 }}>blocks pricing</span>}
+                        {!item.blocking && <span style={{ fontSize: 9, color: C.dim }}>documentation</span>}
+                      </div>
+                      {acceptedItems[item.id] !== undefined ? (
+                        <div style={{ fontSize: 10, color: C.muted, fontStyle: "italic", marginTop: 3 }}>Accepted: {acceptedItems[item.id] || "—"}</div>
+                      ) : (
+                        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                          <button style={{ padding: "3px 10px", fontSize: 9.5, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Fix now</button>
+                          <button onClick={() => setAcceptedItems(a => ({ ...a, [item.id]: "" }))} style={{ padding: "3px 10px", fontSize: 9.5, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer" }}>Accept</button>
+                        </div>
+                      )}
+                      {acceptedItems[item.id] !== undefined && acceptedItems[item.id] === "" && (
+                        <input autoFocus value={acceptedItems[item.id]} onChange={e => setAcceptedItems(a => ({ ...a, [item.id]: e.target.value }))}
+                          placeholder="Reason for accepting…"
+                          style={{ width: "100%", marginTop: 5, padding: "5px 8px", fontSize: 10, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", boxSizing: "border-box" }} />
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {/* Visit note */}
+              <div>
+                <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 5 }}>Visit note</div>
+                <textarea value={closeVisitNote} onChange={e => setCloseVisitNote(e.target.value)} rows={3} placeholder="Optional note about this visit…"
+                  style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
+              </div>
+            </div>
+            <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.border}`, flexShrink: 0, display: "flex", gap: 8 }}>
+              <button onClick={closeVisit} style={{ flex: 1, padding: "9px", fontSize: 11, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 5, cursor: "pointer" }}>Close visit</button>
+              <button onClick={() => setShowCloseVisit(false)} style={{ padding: "9px 14px", fontSize: 11, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Visit log dropdown ───────────────────────────────────────────────── */}
+        {showVisitLog && logToShow && (
+          <div style={{ position: "absolute", top: "calc(100% + 6px)", left: "50%", transform: "translateX(-50%)", width: 440, maxHeight: "60vh", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 12px 36px rgba(0,0,0,0.14)", zIndex: 200, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ padding: "12px 14px 8px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: C.text, fontFamily: "JetBrains Mono", letterSpacing: "0.06em" }}>
+                {historyVisit ? `VISIT LOG · ${new Date(historyVisit.startedAt).toLocaleDateString("en-US",{month:"short",day:"numeric"})}` : `VISIT LOG · ${logToShow.changes.length} entries`}
+              </span>
+              <button onClick={() => { setShowVisitLog(false); setViewingHistoryVisitId(null) }} style={{ background: "none", border: "none", cursor: "pointer", color: C.dim, fontSize: 14, lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ overflowY: "auto", flex: 1, padding: "6px 0" }}>
+              {logToShow.changes.map(e => {
+                const d = new Date(e.timestamp)
+                const t = `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`
+                return (
+                  <div key={e.id} style={{ display: "flex", gap: 12, padding: "7px 14px", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ fontSize: 9.5, color: C.dim, fontFamily: "JetBrains Mono", flexShrink: 0, width: 36, paddingTop: 1 }}>{t}</span>
+                    <span style={{ fontSize: 11, color: C.text, lineHeight: 1.4 }}>{e.message}</span>
+                  </div>
+                )
+              })}
+            </div>
+            <div style={{ padding: "10px 14px", borderTop: `1px solid ${C.border}`, flexShrink: 0 }}>
+              <button disabled title="Coming soon." style={{ padding: "6px 12px", fontSize: 10, fontWeight: 700, background: C.card, color: C.dim, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "not-allowed", opacity: 0.55 }}>
+                + Add work performed
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── 3-column layout ───────────────────────────────────────────────────── */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
       {/* ── LEFT PANEL ─────────────────────────────────────────────────────────── */}
       <div style={{ width: leftPanelOpen ? 252 : 0, minWidth: leftPanelOpen ? 252 : 0, background: C.panel, borderRight: leftPanelOpen ? `1px solid ${C.border}` : "none", display: "flex", flexDirection: "column", overflow: "hidden", transition: "width 0.22s cubic-bezier(0.4,0,0.2,1), min-width 0.22s cubic-bezier(0.4,0,0.2,1)" }}>
@@ -1862,7 +2319,7 @@ export default function App() {
             </svg>
           </button>
           {leftSectionOpen.infra && (
-            <>
+            <div style={canEdit ? {} : disabledStyle} title={canEdit ? undefined : disabledTitle}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 6 }}>
                 {ALL_ASSET_TYPES.map(t => {
                   const active = mode === "add-asset" && addAssetType === t
@@ -1907,7 +2364,7 @@ export default function App() {
                   ? ((drawFrom || drawFromCoord) ? `${drawPoints.length} pts — Complete or keep clicking` : "Click asset or pipe to start…")
                   : "Draw Pipe"}
               </button>
-            </>
+            </div>
           )}
         </Section>
 
@@ -2073,6 +2530,43 @@ export default function App() {
             )
           })}
         </div>
+      </div>
+
+        {/* ── VISITS section ───────────────────────────────────────────────────── */}
+        <div style={{ borderTop: `1px solid ${C.border}`, flexShrink: 0 }}>
+          <button
+            onClick={() => setLeftSectionVisits(v => !v)}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 16px", width: "100%", background: "none", border: "none", cursor: "pointer" }}
+          >
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Visits ({visitHistory.length})</span>
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" style={{ transform: leftSectionVisits ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.15s" }}>
+              <path d="M2 4l4 4 4-4" stroke={C.muted} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          {leftSectionVisits && (
+            <div style={{ padding: "0 16px 10px" }}>
+              {visitHistory.length === 0 && (
+                <div style={{ fontSize: 10, color: C.dim, padding: "4px 0 8px" }}>No past visits recorded.</div>
+              )}
+              {visitHistory.map(v => {
+                const d = new Date(v.startedAt)
+                const dateStr = d.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                const lead = SITE_PERSONS.find(p => p.id === v.technicians[0])
+                return (
+                  <div key={v.id} onClick={() => { setViewingHistoryVisitId(v.id); setShowVisitLog(true) }}
+                    style={{ padding: "7px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer", display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <span style={{ fontSize: 9.5, color: C.dim, fontFamily: "JetBrains Mono", flexShrink: 0, width: 34, paddingTop: 1 }}>{dateStr}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v.visitType}</div>
+                      <div style={{ fontSize: 9.5, color: C.muted }}>{lead?.name ?? "—"} · {assets.length} assets · {pipes.length} pipes</div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
       </div>
 
       {/* ── MAP ────────────────────────────────────────────────────────────────── */}
@@ -2941,17 +3435,148 @@ export default function App() {
         )}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-        {/* Empty state */}
+        {/* Property-level panel — shown when nothing selected */}
         {!selectedAssetId && !selectedPipeId && !selectedViewId && (
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, padding: 32, color: C.dim }}>
-            <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
-              <circle cx="26" cy="26" r="24" stroke={C.border} strokeWidth="1.5" />
-              <circle cx="26" cy="26" r="14" stroke={C.border} strokeWidth="1" strokeDasharray="4 3" />
-              <circle cx="26" cy="26" r="4" fill={C.border} />
-            </svg>
-            <div style={{ fontSize: 12, color: C.dim, textAlign: "center", lineHeight: 1.6 }}>
-              Select an asset, pipe, or map view<br />to view and edit details
-            </div>
+          <div style={{ flex: 1, overflowY: "auto", touchAction: "pan-y" }}>
+            {/* Property header */}
+            <Section>
+              <Label>Property</Label>
+              <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Willow Creek Condominium Association</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>{assets.length} assets · {pipes.length} pipes · {visitHistory.length} past visits</div>
+            </Section>
+
+            {/* ── Site Logistics ─────────────────────────────────────────── */}
+            <Section>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <Label>Site Logistics</Label>
+                <button
+                  onClick={() => canEdit && setShowAddLogistics(v => !v)}
+                  title={canEdit ? undefined : disabledTitle}
+                  style={{ padding: "4px 10px", fontSize: 9.5, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 4, cursor: canEdit ? "pointer" : "not-allowed", opacity: canEdit ? 1 : 0.45 }}
+                >+ Add</button>
+              </div>
+              {showAddLogistics && (
+                <div style={{ padding: "12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, marginBottom: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div>
+                    <FieldLabel text="CATEGORY *" />
+                    <select value={logisticsForm.category} onChange={e => setLogisticsForm(f => ({ ...f, category: e.target.value }))}
+                      style={{ ...inputSt }}>
+                      <option value="">— select —</option>
+                      {LOGISTICS_CATEGORIES.map(c => <option key={c} value={c}>{c === "Lockbox and keys" ? "Lockbox location" : c}</option>)}
+                    </select>
+                    {logisticsForm.category === "Lockbox and keys" && (
+                      <div style={{ fontSize: 9.5, color: C.muted, marginTop: 4, fontStyle: "italic", lineHeight: 1.45 }}>Photograph the location. Codes belong in your access credentials, not here.</div>
+                    )}
+                  </div>
+                  <div>
+                    <FieldLabel text="NOTE" />
+                    <textarea value={logisticsForm.note} onChange={e => setLogisticsForm(f => ({ ...f, note: e.target.value }))} rows={2}
+                      style={{ ...inputSt, resize: "vertical" as const }} />
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      onClick={() => {
+                        if (!logisticsForm.category) return
+                        const entry: LogisticsEntry = { id: Math.random().toString(36).slice(2), category: logisticsForm.category, note: logisticsForm.note, addedBy: selectedPerson.name, visitId: currentVisit?.id }
+                        setLogistics(ls => [...ls, entry])
+                        appendLog(`Site logistics — ${logisticsForm.category} added`)
+                        setLogisticsForm({ category: "", note: "" })
+                        setShowAddLogistics(false)
+                      }}
+                      disabled={!logisticsForm.category}
+                      style={{ flex: 1, padding: "6px", fontSize: 10, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 4, cursor: logisticsForm.category ? "pointer" : "not-allowed", opacity: logisticsForm.category ? 1 : 0.45 }}
+                    >Save</button>
+                    <button onClick={() => setShowAddLogistics(false)} style={{ padding: "6px 12px", fontSize: 10, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer" }}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {logistics.length === 0 && !showAddLogistics && (
+                <div style={{ fontSize: 11, color: C.dim, padding: "4px 0" }}>No logistics recorded yet.</div>
+              )}
+              {LOGISTICS_CATEGORIES.filter(cat => logistics.some(l => l.category === cat)).map(cat => {
+                const entries = logistics.filter(l => l.category === cat)
+                const latest = entries[entries.length - 1]
+                return (
+                  <div key={cat} style={{ marginBottom: 8, padding: "9px 11px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: C.text, marginBottom: 4 }}>{cat}</div>
+                    <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.45 }}>{latest.note || "—"}</div>
+                    <div style={{ fontSize: 9, color: C.dim, marginTop: 4 }}>Added by {latest.addedBy ?? "unknown"}</div>
+                  </div>
+                )
+              })}
+            </Section>
+
+            {/* ── Contacts ───────────────────────────────────────────────── */}
+            <Section>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <Label>Contacts</Label>
+                <button
+                  onClick={() => canEdit && setShowAddContact(v => !v)}
+                  title={canEdit ? undefined : disabledTitle}
+                  style={{ padding: "4px 10px", fontSize: 9.5, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 4, cursor: canEdit ? "pointer" : "not-allowed", opacity: canEdit ? 1 : 0.45 }}
+                >+ Add</button>
+              </div>
+              {showAddContact && (
+                <div style={{ padding: "12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, marginBottom: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {[
+                    { key: "name", label: "NAME *", placeholder: "Full name" },
+                    { key: "phone", label: "PHONE", placeholder: "e.g. 312-555-0100" },
+                    { key: "email", label: "EMAIL", placeholder: "email@example.com" },
+                    { key: "notes", label: "NOTES", placeholder: "" },
+                  ].map(({ key, label, placeholder }) => (
+                    <div key={key}>
+                      <FieldLabel text={label} />
+                      <input value={(contactForm as Record<string, string>)[key] ?? ""} onChange={e => setContactForm(f => ({ ...f, [key]: e.target.value }))}
+                        placeholder={placeholder} style={{ ...inputSt }} />
+                    </div>
+                  ))}
+                  <div>
+                    <FieldLabel text="ROLE *" />
+                    <select value={contactForm.role} onChange={e => setContactForm(f => ({ ...f, role: e.target.value }))} style={{ ...inputSt }}>
+                      <option value="">— select —</option>
+                      {CONTACT_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <FieldLabel text="BEST CONTACT METHOD" />
+                    <select value={contactForm.bestContact ?? ""} onChange={e => setContactForm(f => ({ ...f, bestContact: e.target.value }))} style={{ ...inputSt }}>
+                      <option value="">— select —</option>
+                      {CONTACT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      onClick={() => {
+                        if (!contactForm.name || !contactForm.role) return
+                        const contact: SiteContact = { ...contactForm, id: Math.random().toString(36).slice(2) }
+                        setContacts(cs => [...cs, contact])
+                        appendLog(`Contact added — ${contactForm.name}`)
+                        setContactForm({ name: "", role: "", phone: "", email: "", bestContact: "", notes: "" })
+                        setShowAddContact(false)
+                      }}
+                      disabled={!contactForm.name || !contactForm.role}
+                      style={{ flex: 1, padding: "6px", fontSize: 10, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 4, cursor: contactForm.name && contactForm.role ? "pointer" : "not-allowed", opacity: contactForm.name && contactForm.role ? 1 : 0.45 }}
+                    >Save</button>
+                    <button onClick={() => setShowAddContact(false)} style={{ padding: "6px 12px", fontSize: 10, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer" }}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {contacts.length === 0 && !showAddContact && (
+                <div style={{ fontSize: 11, color: C.dim, padding: "4px 0" }}>No contacts recorded yet.</div>
+              )}
+              {contacts.map(c => (
+                <div key={c.id} style={{ marginBottom: 8, padding: "9px 11px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: C.text }}>{c.name}</div>
+                    <span style={{ fontSize: 9, color: C.muted, background: C.bg, padding: "2px 6px", borderRadius: 3 }}>{c.role}</span>
+                  </div>
+                  {c.phone && <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>{c.phone}</div>}
+                  {c.email && <div style={{ fontSize: 10, color: C.muted }}>{c.email}</div>}
+                  {c.bestContact && <div style={{ fontSize: 9.5, color: C.dim, marginTop: 2 }}>Best: {c.bestContact}</div>}
+                  {c.notes && <div style={{ fontSize: 10, color: C.dim, marginTop: 3 }}>{c.notes}</div>}
+                </div>
+              ))}
+            </Section>
           </div>
         )}
 
@@ -5214,6 +5839,7 @@ export default function App() {
           </div>
         </div>
       )}
+
     </div>
   )
 }
