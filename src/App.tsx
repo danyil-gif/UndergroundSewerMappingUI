@@ -60,6 +60,7 @@ interface Asset {
   // Gutter hub
   cameraAccessible?: boolean
   videos?: CamVideo[]
+  photos?: string[]  // base64 data URLs, in order per photoLabels
   archived?: boolean
   archivedById?: string
   archivedOn?: number
@@ -1174,7 +1175,7 @@ export default function App() {
   const [hoverPipeId, setHoverPipeId] = useState<string | null>(null)
   const [leftPanelOpen, setLeftPanelOpen] = useState(true)
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
-  const [leftSectionOpen, setLeftSectionOpen] = useState({ infra: true, assets: true, pipes: true, visits: false, archived: false })
+  const [leftSectionOpen, setLeftSectionOpen] = useState({ infra: false, assets: false, pipes: false, visits: false, archived: false })
   // ── Visit / session state ───────────────────────────────────────────────────
   const [appView, setAppView] = useState<"launch" | "simd">("launch")
   const [browseMode, setBrowseMode] = useState(false)
@@ -1494,7 +1495,7 @@ export default function App() {
       length: "", slope: "",
       videos: [],
     }
-    setPipes(prev => [...prev, newPipe])
+    createPipe(newPipe)
     setDrawFrom(null)
     setDrawFromCoord(null)
     setDrawPoints([])
@@ -1521,11 +1522,8 @@ export default function App() {
     if (mode === "add-asset") {
       const typeCount = assets.filter(a => a.type === addAssetType).length + 1
       const newId = `a${Date.now()}`
-      setAssets(prev => [...prev, {
-        id: newId, type: addAssetType,
-        label: `${ASSET_PREFIX[addAssetType]}-${String(typeCount).padStart(3, "0")}`,
-        x, y,
-      }])
+      const newAsset: Asset = { id: newId, type: addAssetType, label: `${ASSET_PREFIX[addAssetType]}-${String(typeCount).padStart(3, "0")}`, x, y }
+      createAsset(newAsset)
       setLockedAssetIds(prev => new Set([...prev, newId]))
       setSelectedAssetId(newId)
       setSelectedPipeId(null)
@@ -1570,7 +1568,7 @@ export default function App() {
     if (mode !== "view") return
     e.stopPropagation()
     // Only drag if asset is in edit-location mode (not locked)
-    if (lockedAssetIds.has(assetId) && editingLocationId !== assetId) return
+    if (mode === "view" && lockedAssetIds.has(assetId) && editingLocationId !== assetId) return
     const asset = assets.find(a => a.id === assetId)
     if (!asset) return
     // Compute cursor position in content-space and record offset from asset center
@@ -1651,14 +1649,13 @@ export default function App() {
 
   const savePipe = () => {
     if (!selectedPipeId) return
-    setPipes(prev => prev.map(p => p.id === selectedPipeId ? {
-      ...p,
+    updatePipe(selectedPipeId, {
       start: pipeForm.start,
       end: pipeForm.end,
       length: pipeForm.length,
       slope: pipeForm.slope,
       transitions: pipeForm.transitions,
-    } : p))
+    }, "pipe endpoint updated")
     setEditingPipe(false)
   }
 
@@ -1670,12 +1667,11 @@ export default function App() {
     const rs = bestVideo.runStart!
     const re = bestVideo.runEnd!
     const length = String(Math.abs(parseFloat(re.footage) - parseFloat(rs.footage)).toFixed(0))
-    setPipes(prev => prev.map(p => p.id === pipeId ? {
-      ...p,
+    updatePipe(pipeId, {
       start: { type: rs.pipeType, diameter: rs.pipeSize, depth: rs.depth },
       end:   { type: re.pipeType, diameter: re.pipeSize, depth: re.depth },
       length,
-    } : p))
+    }, "pipe endpoint updated")
   }
 
   const addVideoWithName = (name: string) => {
@@ -1690,7 +1686,9 @@ export default function App() {
   const addVideo = (name = "Camera Run") => {
     if (!selectedPipeId) return
     const vid = addVideoWithName(name)
-    setPipes(prev => prev.map(p => p.id === selectedPipeId ? { ...p, videos: [...p.videos, vid] } : p))
+    const pipe = pipes.find(p => p.id === selectedPipeId)
+    if (!pipe) return
+    updatePipe(selectedPipeId, { videos: [...pipe.videos, vid] }, "inspection added")
     setSelectedVideoId(vid.id)
     setShowVideoForm(false)
     setVideoForm({ name: "", date: "", operator: "", direction: "downstream" })
@@ -1698,7 +1696,8 @@ export default function App() {
 
   const addAssetVideo = (assetId: string, name = "Camera Run") => {
     const vid = addVideoWithName(name)
-    setAssets(prev => prev.map(a => a.id === assetId ? { ...a, videos: [...(a.videos ?? []), vid] } : a))
+    const asset = assets.find(a => a.id === assetId)
+    updateAsset(assetId, { videos: [...(asset?.videos ?? []), vid] }, "inspection updated")
     setAssetVideoSource({ assetId, videoId: vid.id })
     setInspectionFullscreen(true)
     setCaptureStep("none")
@@ -1709,26 +1708,26 @@ export default function App() {
 
   const updateVideo = (fields: Partial<CamVideo>) => {
     if (!selectedPipeId || !selectedVideoId) return
-    setPipes(prev => prev.map(p =>
-      p.id === selectedPipeId
-        ? { ...p, videos: p.videos.map(v => v.id === selectedVideoId ? { ...v, ...fields } : v) }
-        : p
-    ))
+    const pipe = pipes.find(p => p.id === selectedPipeId)
+    if (!pipe) return
+    updatePipe(selectedPipeId, { videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, ...fields } : v) }, "inspection updated")
   }
 
   const saveObservation = () => {
     const obs: Observation = { id: `obs${Date.now()}`, type: captureStep as ObsType, ...captureForm } as Observation
     if (assetVideoSource) {
-      setAssets(prev => prev.map(a => a.id === assetVideoSource.assetId ? {
-        ...a, videos: (a.videos ?? []).map(v => v.id === assetVideoSource.videoId ? { ...v, observations: [...v.observations, obs] } : v)
-      } : a))
+      const srcAsset = assets.find(a => a.id === assetVideoSource.assetId)
+      updateAsset(assetVideoSource.assetId, {
+        videos: (srcAsset?.videos ?? []).map(v => v.id === assetVideoSource.videoId ? { ...v, observations: [...v.observations, obs] } : v)
+      }, "inspection updated")
     } else {
       if (!selectedPipeId || !selectedVideoId) return
-      setPipes(prev => prev.map(p =>
-        p.id === selectedPipeId
-          ? { ...p, videos: p.videos.map(v => v.id === selectedVideoId ? { ...v, observations: [...v.observations, obs] } : v) }
-          : p
-      ))
+      const pipe = pipes.find(p => p.id === selectedPipeId)
+      if (!pipe) return
+      const obsDesc = `observation — ${obs.type}${(obs as any).severity ? ", " + (obs as any).severity : ""}${(obs as any).footage ? ", " + (obs as any).footage + " ft" : ""}`
+      updatePipe(selectedPipeId, {
+        videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, observations: [...v.observations, obs] } : v)
+      }, obsDesc)
     }
     setCaptureStep("none")
     setCaptureForm({})
@@ -1736,20 +1735,21 @@ export default function App() {
 
   const deleteObservation = (obsId: string) => {
     if (assetVideoSource) {
-      setAssets(prev => prev.map(a => a.id === assetVideoSource.assetId ? {
-        ...a, videos: (a.videos ?? []).map(v => v.id === assetVideoSource.videoId ? { ...v, observations: v.observations.filter(o => o.id !== obsId) } : v)
-      } : a))
+      const srcAsset = assets.find(a => a.id === assetVideoSource.assetId)
+      updateAsset(assetVideoSource.assetId, {
+        videos: (srcAsset?.videos ?? []).map(v => v.id === assetVideoSource.videoId ? { ...v, observations: v.observations.filter(o => o.id !== obsId) } : v)
+      }, "inspection updated")
     } else {
       if (!selectedPipeId || !selectedVideoId) return
       setConfirmDialog({
         title: "Remove Observation",
         message: "Remove this observation? This cannot be undone.",
         onConfirm: () => {
-          setPipes(prev => prev.map(p =>
-            p.id === selectedPipeId
-              ? { ...p, videos: p.videos.map(v => v.id === selectedVideoId ? { ...v, observations: v.observations.filter(o => o.id !== obsId) } : v) }
-              : p
-          ))
+          const pipe = pipes.find(p => p.id === selectedPipeId)
+          if (!pipe) return
+          updatePipe(selectedPipeId, {
+            videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, observations: v.observations.filter(o => o.id !== obsId) } : v)
+          }, "inspection updated")
         },
       })
     }
@@ -1758,35 +1758,38 @@ export default function App() {
   const saveRunEnd = () => {
     if (!runEndForm.footage) return
     if (assetVideoSource) {
-      setAssets(prev => prev.map(a => a.id === assetVideoSource.assetId ? {
-        ...a, videos: (a.videos ?? []).map(v => v.id === assetVideoSource.videoId ? {
+      const srcAsset = assets.find(a => a.id === assetVideoSource.assetId)
+      updateAsset(assetVideoSource.assetId, {
+        videos: (srcAsset?.videos ?? []).map(v => v.id === assetVideoSource.videoId ? {
           ...v, runEnd: { footage: runEndForm.footage, depth: runEndForm.depth, pipeType: runEndForm.pipeType, pipeSize: runEndForm.pipeSize }
         } : v)
-      } : a))
+      }, "inspection — run end recorded")
     } else {
       if (!selectedPipeId || !selectedVideoId) return
-      setPipes(prev => prev.map(p =>
-        p.id === selectedPipeId
-          ? { ...p, videos: p.videos.map(v => v.id === selectedVideoId ? { ...v, runEnd: { footage: runEndForm.footage, depth: runEndForm.depth, pipeType: runEndForm.pipeType, pipeSize: runEndForm.pipeSize } } : v) }
-          : p
-      ))
+      const pipe = pipes.find(p => p.id === selectedPipeId)
+      if (!pipe) return
+      updatePipe(selectedPipeId, {
+        videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, runEnd: { footage: runEndForm.footage, depth: runEndForm.depth, pipeType: runEndForm.pipeType, pipeSize: runEndForm.pipeSize } } : v)
+      }, "inspection — run end recorded")
     }
     setShowRunEndForm(false)
     setRunEndForm({ footage: "", depth: "", pipeType: "PVC", pipeSize: '4"' })
   }
 
   const setObsClosed = (closed: boolean) => {
+    const obsDesc = `inspection — observations ${closed ? "closed" : "reopened"}`
     if (assetVideoSource) {
-      setAssets(prev => prev.map(a => a.id === assetVideoSource.assetId ? {
-        ...a, videos: (a.videos ?? []).map(v => v.id === assetVideoSource.videoId ? { ...v, observationsClosed: closed } : v)
-      } : a))
+      const srcAsset = assets.find(a => a.id === assetVideoSource.assetId)
+      updateAsset(assetVideoSource.assetId, {
+        videos: (srcAsset?.videos ?? []).map(v => v.id === assetVideoSource.videoId ? { ...v, observationsClosed: closed } : v)
+      }, obsDesc)
     } else {
       if (!selectedPipeId || !selectedVideoId) return
-      setPipes(prev => prev.map(p =>
-        p.id === selectedPipeId
-          ? { ...p, videos: p.videos.map(v => v.id === selectedVideoId ? { ...v, observationsClosed: closed } : v) }
-          : p
-      ))
+      const pipe = pipes.find(p => p.id === selectedPipeId)
+      if (!pipe) return
+      updatePipe(selectedPipeId, {
+        videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, observationsClosed: closed } : v)
+      }, obsDesc)
     }
     if (closed) setCaptureStep("none")
   }
@@ -1993,7 +1996,8 @@ export default function App() {
       title: "Delete Inspection Video",
       message: `Delete "${vid?.name}"? All ${vid?.observations.length ?? 0} observation${vid?.observations.length !== 1 ? "s" : ""} will be permanently lost.`,
       onConfirm: () => {
-        setPipes(prev => prev.map(p => p.id === pipeId ? { ...p, videos: p.videos.filter(v => v.id !== videoId) } : p))
+        const pipe = pipes.find(p => p.id === pipeId)
+        if (pipe) updatePipe(pipeId, { videos: pipe.videos.filter(v => v.id !== videoId) }, "inspection deleted")
         if (selectedVideoId === videoId) setSelectedVideoId(null)
       },
     })
@@ -2059,15 +2063,15 @@ export default function App() {
 
   // ── Visit helpers ────────────────────────────────────────────────────────────
 
+  const startedAt = visits.find(v => v.id === currentVisitId)?.startedAt
+
   useEffect(() => {
-    if (!currentVisitId) { setElapsed(0); return }
-    const cv = visits.find(v => v.id === currentVisitId)
-    if (!cv) return
-    const tick = () => setElapsed(Math.floor((Date.now() - cv.startedAt) / 1000))
+    if (!currentVisitId || !startedAt) { setElapsed(0); return }
+    const tick = () => setElapsed(Math.floor((Date.now() - startedAt) / 1000))
     tick()
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
-  }, [currentVisitId, visits])
+  }, [currentVisitId, startedAt])
 
   function appendLog(text: string) {
     if (!currentVisitId) return
@@ -2075,6 +2079,31 @@ export default function App() {
     setVisits(vs => vs.map(v => v.id === currentVisitId ? { ...v, log: [...v.log, entry] } : v))
     setVisitLogHighlight(true)
     setTimeout(() => setVisitLogHighlight(false), 1800)
+  }
+
+  // ── Logging wrappers ──────────────────────────────────────────────────────
+  function createAsset(a: Asset) {
+    setAssets(prev => [...prev, a])
+    appendLog(`${a.label} created — ${ASSET_META[a.type].label}${a.location ? `, ${a.location}` : ""}`)
+  }
+
+  function updateAsset(id: string, patch: Partial<Asset>, description: string) {
+    setAssets(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a))
+    const tag = assets.find(a => a.id === id)?.label ?? id
+    appendLog(`${tag} ${description}`)
+  }
+
+  function createPipe(p: Pipe) {
+    setPipes(prev => [...prev, p])
+    const fr = assets.find(a => a.id === p.fromId)
+    const to = p.toId ? assets.find(a => a.id === p.toId) : null
+    appendLog(`${p.label} created — ${fr?.label ?? "free"} → ${to?.label ?? "free"}`)
+  }
+
+  function updatePipe(id: string, patch: Partial<Pipe>, description: string) {
+    setPipes(prev => prev.map(p => p.id === id ? { ...p, ...patch } : p))
+    const tag = pipes.find(p => p.id === id)?.label ?? id
+    appendLog(`${tag} ${description}`)
   }
 
   function startVisit() {
@@ -2564,36 +2593,148 @@ export default function App() {
 
         {/* ── CLOSE VISIT POPOVER ── */}
         {showCloseVisit && currentVisit && (() => {
-          const outstanding: string[] = []
-          const assetCount = currentVisit.log.filter(l => l.recordType === "asset").length
-          const pipeCount = currentVisit.log.filter(l => l.recordType === "pipe").length
+          // Compute outstanding items
+          const activeAssets = assets.filter(a => !a.archived)
+          const activePipes = pipes.filter(p => !p.archived)
+
+          type OutstandingItem = { id: string; label: string; issue: string; blocking: boolean }
+          const outstanding: OutstandingItem[] = []
+
+          activeAssets.forEach(a => {
+            const meta = ASSET_META[a.type]
+            if (!a.conditionRating) outstanding.push({ id: a.id, label: a.label, issue: "condition not set", blocking: true })
+            if (!a.location) outstanding.push({ id: a.id, label: a.label, issue: "location not set", blocking: true })
+            const needsDepth = ["catch-basin","storm-basin","sanitary-basin"].includes(a.type)
+            if (needsDepth && !a.depth) outstanding.push({ id: a.id, label: a.label, issue: "depth not set", blocking: true })
+            const isCleanout = a.type.startsWith("cleanout")
+            const isStack = a.type === "stack-no-cleanout"
+            if (isCleanout && !a.accessSize) outstanding.push({ id: a.id, label: a.label, issue: "access size not set", blocking: true })
+            if (isStack && !a.stackSize) outstanding.push({ id: a.id, label: a.label, issue: "stack size not set", blocking: true })
+            const photoCount = (a.photos ?? []).filter(Boolean).length
+            if (photoCount === 0) outstanding.push({ id: a.id, label: a.label, issue: "no photos", blocking: false })
+          })
+
+          activePipes.forEach(p => {
+            if (p.videos.length === 0) outstanding.push({ id: p.id, label: p.label, issue: "no camera inspection", blocking: false })
+            else if (p.videos.some(v => v.observations.length > 0 && !v.observationsClosed)) {
+              outstanding.push({ id: p.id, label: p.label, issue: "camera inspection not completed", blocking: false })
+            }
+          })
+
+          const blockingUnresolved = outstanding.filter(o => o.blocking && !closeAccepted[`${o.id}:${o.issue}`])
+          const canClose = blockingUnresolved.length === 0
+
           return (
-            <div style={{ position: "absolute", top: 44, right: 14, width: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 8px 32px #0008", zIndex: 300, display: "flex", flexDirection: "column" }}>
-              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ position: "absolute", top: 44, right: 14, width: 480, maxHeight: "calc(100vh - 80px)", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 8px 32px #0008", zIndex: 300, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              {/* Header */}
+              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>Close visit</div>
                 <button onClick={() => setShowCloseVisit(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: C.muted, padding: 4 }}>✕</button>
               </div>
-              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
-                <div style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>{currentVisit.property} · {currentVisit.visitType}</div>
-                <div style={{ display: "flex", gap: 16 }}>
-                  <span style={{ fontSize: 11, color: C.muted }}><strong style={{ color: C.text }}>{currentVisit.log.length}</strong> log entries</span>
-                  {assetCount > 0 && <span style={{ fontSize: 11, color: C.muted }}><strong style={{ color: C.text }}>{assetCount}</strong> assets</span>}
-                  {pipeCount > 0 && <span style={{ fontSize: 11, color: C.muted }}><strong style={{ color: C.text }}>{pipeCount}</strong> pipes</span>}
+              {/* Context */}
+              <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: C.text }}>{currentVisit.property}</div>
+                <div style={{ fontSize: 10, color: C.muted }}>{currentVisit.visitType} · {currentVisit.log.length} log entries</div>
+              </div>
+
+              {/* Scrollable middle */}
+              <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+
+                {/* Outstanding items */}
+                {outstanding.length > 0 && (
+                  <div style={{ padding: "12px 18px", borderBottom: `1px solid ${C.border}` }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>Outstanding</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      {outstanding.map(o => {
+                        const key = `${o.id}:${o.issue}`
+                        const accepted = closeAccepted[key]
+                        const acceptInput = closeAccepted[`${key}__input`] ?? ""
+                        const setAcceptInput = (v: string) => setCloseAccepted(prev => ({ ...prev, [`${key}__input`]: v }))
+                        return (
+                          <div key={key} style={{ padding: "8px 10px", background: accepted ? C.card : (o.blocking ? "#FEF2F2" : C.card), border: `1px solid ${accepted ? C.border : (o.blocking ? "#FECACA" : C.border)}`, borderRadius: 6 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: o.blocking ? "#DC2626" : "#D97706" }}>⚠</span>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: C.text, fontFamily: "JetBrains Mono" }}>{o.label}</span>
+                              <span style={{ fontSize: 10, color: C.muted, flex: 1 }}>{o.issue}</span>
+                              <span style={{ fontSize: 9, color: o.blocking ? "#DC2626" : "#D97706", fontWeight: 600, flexShrink: 0 }}>{o.blocking ? "blocks pricing" : "documentation"}</span>
+                              {!accepted && (
+                                <>
+                                  <button onClick={() => { setShowCloseVisit(false); const el = document.getElementById(`field-${o.id}`); el?.scrollIntoView({ behavior: "smooth" }) }}
+                                    style={{ fontSize: 9, padding: "2px 6px", background: C.cyan, border: "none", borderRadius: 3, cursor: "pointer", color: "#fff", fontWeight: 700, flexShrink: 0 }}>
+                                    Fix now
+                                  </button>
+                                  <button onClick={() => setCloseAccepted(prev => ({ ...prev, [`${key}__accepting`]: "1" }))}
+                                    style={{ fontSize: 9, padding: "2px 6px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 3, cursor: "pointer", color: C.muted, fontWeight: 700, flexShrink: 0 }}>
+                                    Accept
+                                  </button>
+                                </>
+                              )}
+                              {accepted && <span style={{ fontSize: 9, color: "#22C55E", fontWeight: 700 }}>✓ Accepted</span>}
+                            </div>
+                            {closeAccepted[`${key}__accepting`] && !accepted && (
+                              <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                                <input autoFocus value={acceptInput} onChange={e => setAcceptInput(e.target.value)} placeholder="Reason for accepting…"
+                                  style={{ flex: 1, padding: "4px 8px", fontSize: 10, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }} />
+                                <button onClick={() => {
+                                    if (!acceptInput.trim()) return
+                                    setCloseAccepted(prev => {
+                                      const next = { ...prev }
+                                      next[key] = acceptInput.trim()
+                                      delete next[`${key}__accepting`]
+                                      delete next[`${key}__input`]
+                                      return next
+                                    })
+                                  }}
+                                  disabled={!acceptInput.trim()}
+                                  style={{ fontSize: 9, padding: "4px 8px", background: acceptInput.trim() ? "#D97706" : C.card, border: "none", borderRadius: 4, cursor: acceptInput.trim() ? "pointer" : "not-allowed", color: acceptInput.trim() ? "#fff" : C.dim, fontWeight: 700 }}>
+                                  Save
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Full log */}
+                <div style={{ padding: "12px 18px", borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>Log ({currentVisit.log.length})</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                    {currentVisit.log.slice().reverse().map(entry => (
+                      <div key={entry.id} style={{ padding: "5px 0", display: "flex", gap: 10, borderBottom: `1px solid ${C.border}` }}>
+                        <span style={{ fontSize: 9, color: C.dim, fontFamily: "JetBrains Mono", flexShrink: 0, paddingTop: 1 }}>
+                          {new Date(entry.at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                        </span>
+                        <span style={{ fontSize: 10.5, color: C.text, lineHeight: 1.5 }}>{entry.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Visit note */}
+                <div style={{ padding: "12px 18px" }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>Visit note (optional)</div>
+                  <textarea value={closeVisitNote} onChange={e => setCloseVisitNote(e.target.value)} rows={3}
+                    placeholder="Notes about this visit…"
+                    style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
                 </div>
               </div>
-              <div style={{ padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>Visit note (optional)</div>
-                <textarea value={closeVisitNote} onChange={e => setCloseVisitNote(e.target.value)} rows={3}
-                  placeholder="Notes about this visit…"
-                  style={{ width: "100%", padding: "8px 10px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, color: C.text, outline: "none", resize: "vertical", boxSizing: "border-box" }} />
-              </div>
-              <div style={{ padding: "14px 18px", display: "flex", gap: 10, justifyContent: "flex-end" }}>
+
+              {/* Footer */}
+              <div style={{ padding: "12px 18px", borderTop: `1px solid ${C.border}`, display: "flex", gap: 10, justifyContent: "flex-end", flexShrink: 0 }}>
+                {!canClose && (
+                  <div style={{ flex: 1, fontSize: 10, color: "#DC2626", alignSelf: "center" }}>
+                    {blockingUnresolved.length} blocking item{blockingUnresolved.length !== 1 ? "s" : ""} must be fixed or accepted
+                  </div>
+                )}
                 <button onClick={() => setShowCloseVisit(false)}
                   style={{ padding: "8px 16px", fontSize: 11, background: C.card, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer", color: C.muted }}>
                   Cancel
                 </button>
-                <button onClick={closeVisit}
-                  style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, background: "#EF4444", border: "none", borderRadius: 5, cursor: "pointer", color: "#fff" }}>
+                <button onClick={closeVisit} disabled={!canClose}
+                  style={{ padding: "8px 16px", fontSize: 11, fontWeight: 700, background: canClose ? "#EF4444" : C.card, border: "none", borderRadius: 5, cursor: canClose ? "pointer" : "not-allowed", color: canClose ? "#fff" : C.dim }}>
                   Close visit
                 </button>
               </div>
@@ -2614,8 +2755,8 @@ export default function App() {
       )}
       <div style={{ width: leftPanelOpen ? 252 : 0, minWidth: leftPanelOpen ? 252 : 0, background: C.panel, borderRight: leftPanelOpen ? `1px solid ${C.border}` : "none", display: "flex", flexDirection: "column", overflow: "hidden", transition: "width 0.22s cubic-bezier(0.4,0,0.2,1), min-width 0.22s cubic-bezier(0.4,0,0.2,1)" }}>
 
-        {/* Logo */}
-        <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${C.border}` }}>
+        {/* Logo — fixed header */}
+        <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3, justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
@@ -2633,6 +2774,9 @@ export default function App() {
           </div>
           <div style={{ fontSize: 9, color: C.blue, fontFamily: "JetBrains Mono", letterSpacing: "0.1em" }}>UNDERGROUND INFRASTRUCTURE</div>
         </div>
+
+        {/* Scrollable sections container */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
 
         {/* Map upload */}
         <Section>
@@ -2723,13 +2867,13 @@ export default function App() {
             onClick={() => setLeftSectionOpen(s => ({ ...s, assets: !s.assets }))}
             style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 16px", background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", cursor: "pointer", flexShrink: 0 }}
           >
-            <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Assets &amp; Pipes ({assets.length + pipes.length})</span>
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Assets &amp; Pipes · {assets.filter(a => !a.archived).length + pipes.filter(p => !p.archived).length}</span>
             <svg width="11" height="11" viewBox="0 0 12 12" fill="none" style={{ transform: leftSectionOpen.assets ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.15s" }}>
               <path d="M2 4l4 4 4-4" stroke={C.muted} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
           {leftSectionOpen.assets && (
-            <div style={{ overflowY: "auto", flex: 1, touchAction: "pan-y" }}>
+            <div style={{ overflowY: "auto", flex: 1, maxHeight: 280, touchAction: "pan-y" }}>
               {/* Assets */}
               {assets.filter(a => !a.archived).length > 0 && (
                 <div style={{ padding: "4px 16px 2px", fontSize: 8.5, fontWeight: 700, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase" }}>Assets</div>
@@ -2816,13 +2960,13 @@ export default function App() {
             onClick={() => setLeftSectionOpen(s => ({ ...s, visits: !s.visits }))}
             style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 16px", background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", cursor: "pointer", flexShrink: 0 }}
           >
-            <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Visits ({visits.length})</span>
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Visits · {visits.length}</span>
             <svg width="11" height="11" viewBox="0 0 12 12" fill="none" style={{ transform: leftSectionOpen.visits ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.15s" }}>
               <path d="M2 4l4 4 4-4" stroke={C.muted} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
           {leftSectionOpen.visits && (
-            <div style={{ overflowY: "auto", flex: 1 }}>
+            <div style={{ overflowY: "auto", flex: 1, maxHeight: 280 }}>
               {currentVisit && (
                 <div onClick={() => { setShowVisitLog(v => !v); setViewingVisitId(null) }}
                   style={{ padding: "7px 16px", cursor: "pointer", background: "#22C55E0F", borderLeft: `2px solid #22C55E`, display: "flex", alignItems: "center", gap: 8, transition: "background 0.1s" }}>
@@ -2868,7 +3012,7 @@ export default function App() {
               </svg>
             </button>
             {leftSectionOpen.archived && (
-              <div style={{ overflowY: "auto", maxHeight: 240 }}>
+              <div style={{ overflowY: "auto", maxHeight: 280 }}>
                 {assets.filter(a => a.archived).map(a => {
                   const who = SITE_PERSONS.find(p => p.id === a.archivedById)
                   const d = a.archivedOn ? new Date(a.archivedOn).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""
@@ -2988,6 +3132,7 @@ export default function App() {
             )
           })}
         </div>
+        </div>{/* end scrollable sections */}
       </div>
 
       {/* ── MAP ────────────────────────────────────────────────────────────────── */}
@@ -4007,14 +4152,14 @@ export default function App() {
                 {LOCATION_OPTIONS.map(loc => {
                   const sel = selectedAsset.location === loc
                   return (
-                    <button key={loc} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, location: sel ? undefined : loc, locationOther: loc === "Other" && sel ? undefined : a.locationOther } : a))}
+                    <button key={loc} onClick={() => updateAsset(selectedAsset.id, { location: sel ? undefined : loc, locationOther: loc === "Other" && sel ? undefined : selectedAsset.locationOther }, "location — " + (sel ? "cleared" : loc))}
                       style={{ padding: "4px 9px", fontSize: 9.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}`, transition: "all 0.1s" }}
                     >{loc}</button>
                   )
                 })}
               </div>
               {selectedAsset.location === "Other" && (
-                <input value={selectedAsset.locationOther ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, locationOther: e.target.value } : a))}
+                <input value={selectedAsset.locationOther ?? ""} onChange={e => updateAsset(selectedAsset.id, { locationOther: e.target.value }, "location note — " + e.target.value)}
                   placeholder="Describe location…" style={{ marginTop: 8, width: "100%", padding: "6px 8px", fontSize: 11, border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", fontFamily: "'DM Sans', sans-serif", boxSizing: "border-box" }} />
               )}
             </Section>
@@ -4026,20 +4171,65 @@ export default function App() {
               const photoLabels = isBasin
                 ? ["Wider Area View","Close-Up","Inside — Lid Open"]
                 : ["Wider Area View","Close-Up"]
+              const photos = a.photos ?? []
+              const pickPhoto = (idx: number) => {
+                const inp = document.createElement("input")
+                inp.type = "file"; inp.accept = "image/*"
+                inp.onchange = () => {
+                  const file = inp.files?.[0]; if (!file) return
+                  const reader = new FileReader()
+                  reader.onload = ev => {
+                    const src = ev.target?.result as string
+                    const next = [...photos]; next[idx] = src
+                    setAssets(prev => prev.map(x => x.id === a.id ? { ...x, photos: next } : x))
+                    appendLog(`${a.label} photo added — ${photoLabels[idx]}`)
+                  }
+                  reader.readAsDataURL(file)
+                }
+                inp.click()
+              }
+              const removePhoto = (idx: number) => {
+                setConfirmDialog({
+                  title: "Remove Photo",
+                  message: `Remove "${photoLabels[idx]}"?`,
+                  onConfirm: () => {
+                    const next = [...photos]; next[idx] = ""
+                    setAssets(prev => prev.map(x => x.id === a.id ? { ...x, photos: next } : x))
+                    appendLog(`${a.label} photo removed — ${photoLabels[idx]}`)
+                  },
+                })
+              }
               return (
                 <Section>
                   <Label>Photos</Label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                    {photoLabels.map(lbl => (
-                      <div key={lbl} style={{ padding: "10px 12px", borderRadius: 6, border: `1px dashed ${C.border}`, background: C.card, display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="1" y="3" width="16" height="12" rx="2" stroke={C.muted} strokeWidth="1.2" /><circle cx="9" cy="9" r="3" stroke={C.muted} strokeWidth="1" /><path d="M6 3l1-2h4l1 2" stroke={C.muted} strokeWidth="1" /></svg>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 10.5, fontWeight: 600, color: C.muted }}>{lbl}</div>
-                          <div style={{ fontSize: 9.5, color: C.dim }}>Tap to capture or upload</div>
+                    {photoLabels.map((lbl, idx) => {
+                      const src = photos[idx]
+                      const prevFilled = idx === 0 || !!photos[idx - 1]
+                      const disabled = !prevFilled
+                      if (src) {
+                        return (
+                          <div key={lbl} style={{ borderRadius: 6, border: `1px solid ${C.border}`, overflow: "hidden", background: C.card }}>
+                            <img src={src} alt={lbl} style={{ width: "100%", height: 100, objectFit: "cover", display: "block" }} />
+                            <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                              <span style={{ fontSize: 10, color: C.muted, fontWeight: 600 }}>{lbl}</span>
+                              <button onClick={() => removePhoto(idx)} style={{ fontSize: 9, color: "#EF4444", background: "none", border: "none", cursor: "pointer", fontWeight: 700 }}>Remove</button>
+                            </div>
+                          </div>
+                        )
+                      }
+                      return (
+                        <div key={lbl} onClick={disabled ? undefined : () => pickPhoto(idx)}
+                          style={{ padding: "10px 12px", borderRadius: 6, border: `1px dashed ${disabled ? C.border : C.cyan}`, background: C.card, display: "flex", alignItems: "center", gap: 10, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.45 : 1 }}>
+                          <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="1" y="3" width="16" height="12" rx="2" stroke={disabled ? C.muted : C.cyan} strokeWidth="1.2" /><circle cx="9" cy="9" r="3" stroke={disabled ? C.muted : C.cyan} strokeWidth="1" /><path d="M6 3l1-2h4l1 2" stroke={disabled ? C.muted : C.cyan} strokeWidth="1" /></svg>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 10.5, fontWeight: 600, color: disabled ? C.dim : C.muted }}>{lbl}</div>
+                            <div style={{ fontSize: 9.5, color: C.dim }}>{disabled ? "Fill slot above first" : "Tap to capture or upload"}</div>
+                          </div>
+                          {!disabled && <div style={{ fontSize: 9, color: C.cyan, fontFamily: "JetBrains Mono", fontWeight: 700 }}>+ ADD</div>}
                         </div>
-                        <div style={{ fontSize: 9, color: C.dim, fontFamily: "JetBrains Mono" }}>+ ADD</div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </Section>
               )
@@ -4050,7 +4240,7 @@ export default function App() {
               <Section>
                 <Label>Depth</Label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input type="number" value={selectedAsset.depth ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, depth: e.target.value } : a))}
+                  <input type="number" value={selectedAsset.depth ?? ""} onChange={e => updateAsset(selectedAsset.id, { depth: e.target.value }, "depth — " + e.target.value + " ft")}
                     placeholder="0" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
                   <span style={{ fontSize: 12, color: C.muted }}>ft</span>
                 </div>
@@ -4065,7 +4255,7 @@ export default function App() {
                   const sel = selectedAsset.conditionRating === r
                   const col = CONDITION_COLORS[r]
                   return (
-                    <button key={r} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, conditionRating: r, conditionBlocker: undefined } : a))}
+                    <button key={r} onClick={() => updateAsset(selectedAsset.id, { conditionRating: r, conditionBlocker: undefined }, "condition — " + CONDITION_LABELS[r])}
                       style={{ display: "flex", alignItems: "flex-start", gap: 0, padding: 0, background: sel ? col + "12" : C.card, border: `1.5px solid ${sel ? col : C.border}`, borderRadius: 7, cursor: "pointer", textAlign: "left", overflow: "hidden" }}>
                       <div style={{ width: 4, alignSelf: "stretch", background: col, flexShrink: 0 }} />
                       <div style={{ padding: "9px 11px" }}>
@@ -4084,7 +4274,7 @@ export default function App() {
                   const sel = selectedAsset.conditionRating === "unable"
                   return (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <button onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, conditionRating: "unable" } : a))}
+                      <button onClick={() => updateAsset(selectedAsset.id, { conditionRating: "unable" }, "condition — unable to evaluate")}
                         style={{ display: "flex", alignItems: "flex-start", gap: 0, padding: 0, background: sel ? CONDITION_UNABLE_COLOR + "12" : C.card, border: `1.5px solid ${sel ? CONDITION_UNABLE_COLOR : C.border}`, borderRadius: 7, cursor: "pointer", textAlign: "left", overflow: "hidden" }}>
                         <div style={{ width: 4, alignSelf: "stretch", background: CONDITION_UNABLE_COLOR, flexShrink: 0 }} />
                         <div style={{ padding: "9px 11px" }}>
@@ -4099,7 +4289,7 @@ export default function App() {
                         <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", background: CONDITION_UNABLE_COLOR + "0D", border: `1px solid ${CONDITION_UNABLE_COLOR}33`, borderRadius: 6 }}>
                           <div>
                             <FieldLabel text="WHAT PREVENTED ASSESSMENT *" />
-                            <select value={selectedAsset.conditionBlocker ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, conditionBlocker: e.target.value } : a))}
+                            <select value={selectedAsset.conditionBlocker ?? ""} onChange={e => updateAsset(selectedAsset.id, { conditionBlocker: e.target.value }, "condition blocker — " + e.target.value)}
                               style={{ ...inputSt, paddingRight: 8 }}>
                               <option value="">— select —</option>
                               {CONDITION_BLOCKER_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
@@ -4131,7 +4321,7 @@ export default function App() {
               <Section>
                 <Label>Clean-out Access Size</Label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input type="number" value={selectedAsset.accessSize ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, accessSize: e.target.value } : a))}
+                  <input type="number" value={selectedAsset.accessSize ?? ""} onChange={e => updateAsset(selectedAsset.id, { accessSize: e.target.value }, "access size — " + e.target.value)}
                     placeholder="4" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
                   <span style={{ fontSize: 12, color: C.muted }}>in</span>
                 </div>
@@ -4143,7 +4333,7 @@ export default function App() {
                 <div style={{ display: "flex", gap: 6 }}>
                   {["One-Way","Two-Way"].map(opt => {
                     const sel = selectedAsset.accessConfig === opt
-                    return <button key={opt} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, accessConfig: sel ? undefined : opt } : a))} style={{ flex: 1, padding: "7px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 5, cursor: "pointer", background: sel ? C.cyan : "#fff", color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                    return <button key={opt} onClick={() => updateAsset(selectedAsset.id, { accessConfig: sel ? undefined : opt }, "access config — " + (sel ? "cleared" : opt))} style={{ flex: 1, padding: "7px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 5, cursor: "pointer", background: sel ? C.cyan : "#fff", color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
                   })}
                 </div>
               </Section>
@@ -4154,11 +4344,11 @@ export default function App() {
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
                   {CONN_OPTIONS.map(opt => {
                     const sel = selectedAsset.undergroundConn === opt
-                    return <button key={opt} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, undergroundConn: sel ? undefined : opt } : a))} style={{ padding: "4px 9px", fontSize: 9.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                    return <button key={opt} onClick={() => updateAsset(selectedAsset.id, { undergroundConn: sel ? undefined : opt }, "underground connection — " + (sel ? "cleared" : opt))} style={{ padding: "4px 9px", fontSize: 9.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
                   })}
                 </div>
                 {selectedAsset.undergroundConn === "Other" && (
-                  <input value={selectedAsset.undergroundConnOther ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, undergroundConnOther: e.target.value } : a))}
+                  <input value={selectedAsset.undergroundConnOther ?? ""} onChange={e => updateAsset(selectedAsset.id, { undergroundConnOther: e.target.value }, "underground connection — " + e.target.value)}
                     placeholder="Describe connection…" style={{ marginTop: 8, width: "100%", padding: "6px 8px", fontSize: 11, border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", fontFamily: "'DM Sans', sans-serif", boxSizing: "border-box" }} />
                 )}
               </Section>
@@ -4167,7 +4357,7 @@ export default function App() {
               <Section>
                 <Label>Vertical Pipe Size</Label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input type="number" value={selectedAsset.verticalPipeSize ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, verticalPipeSize: e.target.value } : a))}
+                  <input type="number" value={selectedAsset.verticalPipeSize ?? ""} onChange={e => updateAsset(selectedAsset.id, { verticalPipeSize: e.target.value }, "vertical pipe size — " + e.target.value)}
                     placeholder="4" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
                   <span style={{ fontSize: 12, color: C.muted }}>in</span>
                 </div>
@@ -4177,7 +4367,7 @@ export default function App() {
               <Section>
                 <Label>Above-Ground / Horizontal Pipe Size</Label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input type="number" value={selectedAsset.horizontalPipeSize ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, horizontalPipeSize: e.target.value } : a))}
+                  <input type="number" value={selectedAsset.horizontalPipeSize ?? ""} onChange={e => updateAsset(selectedAsset.id, { horizontalPipeSize: e.target.value }, "horizontal pipe size — " + e.target.value)}
                     placeholder="4" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
                   <span style={{ fontSize: 12, color: C.muted }}>in</span>
                 </div>
@@ -4189,7 +4379,7 @@ export default function App() {
               <Section>
                 <Label>Stack Size</Label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input type="number" value={selectedAsset.stackSize ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, stackSize: e.target.value } : a))}
+                  <input type="number" value={selectedAsset.stackSize ?? ""} onChange={e => updateAsset(selectedAsset.id, { stackSize: e.target.value }, "stack size — " + e.target.value)}
                     placeholder="4" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
                   <span style={{ fontSize: 12, color: C.muted }}>in</span>
                 </div>
@@ -4217,10 +4407,10 @@ export default function App() {
                       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                         {[true, false].map(v => {
                           const sel = selectedAsset.flowTestResult === v
-                          return <button key={String(v)} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, flowTestResult: v } : a))} style={{ flex: 1, padding: "8px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: sel ? (v ? "#00803E" : "#DC2626") : "#fff", color: sel ? "#fff" : C.muted, border: `1.5px solid ${sel ? (v ? "#00803E" : "#DC2626") : C.border}` }}>{v ? "YES" : "NO"}</button>
+                          return <button key={String(v)} onClick={() => updateAsset(selectedAsset.id, { flowTestResult: v }, "flow test result — " + (v ? "pass" : "fail"))} style={{ flex: 1, padding: "8px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: sel ? (v ? "#00803E" : "#DC2626") : "#fff", color: sel ? "#fff" : C.muted, border: `1.5px solid ${sel ? (v ? "#00803E" : "#DC2626") : C.border}` }}>{v ? "YES" : "NO"}</button>
                         })}
                       </div>
-                      <button onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, flowTestDone: true } : a))} disabled={selectedAsset.flowTestResult === undefined} style={{ width: "100%", padding: "8px", fontSize: 10.5, fontWeight: 700, background: selectedAsset.flowTestResult !== undefined ? C.cyan : C.card, color: selectedAsset.flowTestResult !== undefined ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: selectedAsset.flowTestResult !== undefined ? "pointer" : "default" }}>Save Test</button>
+                      <button onClick={() => updateAsset(selectedAsset.id, { flowTestDone: true }, "flow test — done")} disabled={selectedAsset.flowTestResult === undefined} style={{ width: "100%", padding: "8px", fontSize: 10.5, fontWeight: 700, background: selectedAsset.flowTestResult !== undefined ? C.cyan : C.card, color: selectedAsset.flowTestResult !== undefined ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: selectedAsset.flowTestResult !== undefined ? "pointer" : "default" }}>Save Test</button>
                     </>
                   )}
                 </div>
@@ -4232,7 +4422,7 @@ export default function App() {
               <>
                 <Section>
                   <Label>Installation Date</Label>
-                  <input type="date" value={selectedAsset.installDate ?? ""} onChange={e => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, installDate: e.target.value } : a))}
+                  <input type="date" value={selectedAsset.installDate ?? ""} onChange={e => updateAsset(selectedAsset.id, { installDate: e.target.value }, "install date — " + e.target.value)}
                     style={{ padding: "6px 8px", fontSize: 11, border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", color: C.text, background: C.card }} />
                 </Section>
                 <Section>
@@ -4254,10 +4444,10 @@ export default function App() {
                         <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10 }}>
                           {[true, false].map(v => {
                             const sel = selectedAsset.dischargeFunctioning === v
-                            return <button key={String(v)} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, dischargeFunctioning: v } : a))} style={{ padding: "8px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: sel ? (v ? "#00803E" : "#DC2626") : "#fff", color: sel ? "#fff" : C.muted, border: `1.5px solid ${sel ? (v ? "#00803E" : "#DC2626") : C.border}`, textAlign: "left" }}>{v ? "YES — Functioning Properly" : "NO — Not Functioning Properly"}</button>
+                            return <button key={String(v)} onClick={() => updateAsset(selectedAsset.id, { dischargeFunctioning: v }, "discharge functioning — " + (v ? "yes" : "no"))} style={{ padding: "8px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: sel ? (v ? "#00803E" : "#DC2626") : "#fff", color: sel ? "#fff" : C.muted, border: `1.5px solid ${sel ? (v ? "#00803E" : "#DC2626") : C.border}`, textAlign: "left" }}>{v ? "YES — Functioning Properly" : "NO — Not Functioning Properly"}</button>
                           })}
                         </div>
-                        <button onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, dischargeTestDone: true } : a))} disabled={selectedAsset.dischargeFunctioning === undefined} style={{ width: "100%", padding: "8px", fontSize: 10.5, fontWeight: 700, background: selectedAsset.dischargeFunctioning !== undefined ? C.cyan : C.card, color: selectedAsset.dischargeFunctioning !== undefined ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: selectedAsset.dischargeFunctioning !== undefined ? "pointer" : "default" }}>Save Test</button>
+                        <button onClick={() => updateAsset(selectedAsset.id, { dischargeTestDone: true }, "discharge test — done")} disabled={selectedAsset.dischargeFunctioning === undefined} style={{ width: "100%", padding: "8px", fontSize: 10.5, fontWeight: 700, background: selectedAsset.dischargeFunctioning !== undefined ? C.cyan : C.card, color: selectedAsset.dischargeFunctioning !== undefined ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: selectedAsset.dischargeFunctioning !== undefined ? "pointer" : "default" }}>Save Test</button>
                       </>
                     )}
                   </div>
@@ -4273,7 +4463,7 @@ export default function App() {
                   <div style={{ display: "flex", gap: 6 }}>
                     {[true, false].map(v => {
                       const sel = selectedAsset.cameraAccessible === v
-                      return <button key={String(v)} onClick={() => setAssets(prev => prev.map(a => a.id === selectedAsset.id ? { ...a, cameraAccessible: sel ? undefined : v } : a))} style={{ flex: 1, padding: "8px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: sel ? C.cyan : "#fff", color: sel ? "#fff" : C.muted, border: `1.5px solid ${sel ? C.cyan : C.border}` }}>{v ? "YES" : "NO"}</button>
+                      return <button key={String(v)} onClick={() => updateAsset(selectedAsset.id, { cameraAccessible: sel ? undefined : v }, "camera accessible — " + (sel ? "cleared" : (v ? "yes" : "no")))} style={{ flex: 1, padding: "8px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: sel ? C.cyan : "#fff", color: sel ? "#fff" : C.muted, border: `1.5px solid ${sel ? C.cyan : C.border}` }}>{v ? "YES" : "NO"}</button>
                     })}
                   </div>
                 </Section>
@@ -6149,10 +6339,16 @@ export default function App() {
           : pipes.find(x => x.id === archiveDialog.id)
         if (!rec) return null
         const isAsset = archiveDialog.type === "asset"
-        const connectedPipes = isAsset ? pipes.filter(p => p.fromId === archiveDialog.id || p.toId === archiveDialog.id) : []
+        const connectedPipes = isAsset ? pipes.filter(p => !p.archived && (p.fromId === archiveDialog.id || p.toId === archiveDialog.id)) : []
         const assetRec = isAsset ? assets.find(x => x.id === archiveDialog.id) : null
-        const hasObs = assetRec ? ((assetRec.conditionRating !== undefined) || ((assetRec.videos ?? []).length > 0)) : false
-        const hasVideos = !isAsset ? ((rec as Pipe).videos.length > 0) : false
+        const pipeRec = !isAsset ? (rec as Pipe) : null
+        const photoCount = assetRec ? (assetRec.photos ?? []).filter(Boolean).length : 0
+        const assetVideoCount = (assetRec?.videos ?? []).length
+        const assetObsCount = (assetRec?.videos ?? []).reduce((s, v) => s + v.observations.length, 0)
+        const pipeVideoCount = pipeRec ? pipeRec.videos.length : 0
+        const pipeObsCount = pipeRec ? pipeRec.videos.reduce((s, v) => s + v.observations.length, 0) : 0
+        const hasCondition = assetRec?.conditionRating !== undefined
+        const hasVideos = pipeRec ? pipeRec.videos.length > 0 : assetVideoCount > 0
         const tier = archiveDialog.tier
 
         return (
@@ -6165,13 +6361,21 @@ export default function App() {
 
               {tier === "archive" ? (
                 <>
-                  <div style={{ fontSize: 13, color: C.text, marginBottom: 8 }}>
-                    {isAsset ? `${assetRec?.type}` : `${(rec as Pipe).label}`}
+                  {/* Context: type and location */}
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>
+                      {isAsset ? ASSET_META[assetRec!.type]?.label : "Pipe"}
+                      {assetRec?.location ? ` · ${assetRec.location}` : ""}
+                      {pipeRec ? ` · ${assets.find(a => a.id === pipeRec.fromId)?.label ?? "?"} → ${pipeRec.toId ? (assets.find(a => a.id === pipeRec.toId)?.label ?? "free") : "free"}` : ""}
+                    </div>
                   </div>
+                  {/* What's attached */}
                   <div style={{ fontSize: 11, color: C.dim, marginBottom: 12, padding: "10px 12px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 6 }}>
-                    This has history attached and will be archived, not deleted:
-                    {hasObs && <div style={{ marginTop: 6, color: C.muted }}>• Observations and condition data</div>}
-                    {hasVideos && <div style={{ marginTop: 4, color: C.muted }}>• {(rec as Pipe).videos.length} camera inspection{(rec as Pipe).videos.length !== 1 ? "s" : ""}</div>}
+                    <div style={{ fontWeight: 600, color: C.muted, marginBottom: 6 }}>This has history attached and will be archived, not deleted:</div>
+                    {hasCondition && <div style={{ marginTop: 4, color: C.muted }}>• Condition rated {assetRec!.conditionRating}</div>}
+                    {photoCount > 0 && <div style={{ marginTop: 4, color: C.muted }}>• {photoCount} photo{photoCount !== 1 ? "s" : ""}</div>}
+                    {assetObsCount > 0 && <div style={{ marginTop: 4, color: C.muted }}>• {assetObsCount} observation{assetObsCount !== 1 ? "s" : ""} across {assetVideoCount} inspection{assetVideoCount !== 1 ? "s" : ""}</div>}
+                    {pipeVideoCount > 0 && <div style={{ marginTop: 4, color: C.muted }}>• {pipeVideoCount} camera inspection{pipeVideoCount !== 1 ? "s" : ""} with {pipeObsCount} observation{pipeObsCount !== 1 ? "s" : ""}</div>}
                     {connectedPipes.length > 0 && <div style={{ marginTop: 4, color: C.muted }}>• {connectedPipes.length} connected pipe{connectedPipes.length !== 1 ? "s" : ""} — {connectedPipes.map(p => p.label).join(", ")}</div>}
                   </div>
 
