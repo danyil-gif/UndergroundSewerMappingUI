@@ -26,7 +26,7 @@ interface ConfirmDialogState {
   message: string
   onConfirm: () => void
 }
-type ObsType = "tie-in" | "defect" | "excavation" | "direction-change" | "pipe-transition" | "start-of-pipe" | "end-of-pipe"
+type ObsType = "tie-in" | "defect" | "excavation" | "direction-change" | "pipe-transition" | "start-of-pipe" | "end-of-pipe" | "camera-stoppage"
 type Severity = 1 | 2 | 3 | 4 | 5
 
 interface Asset {
@@ -148,10 +148,10 @@ interface CamVideo {
   // Step 5 — Analysis
   observationsClosed: boolean
   observations: Observation[]
-  // Step 6 — Fully inspected
-  fullyInspected?: "Yes" | "Partially" | "No"
-  notFullyReason?: string
-  assessableFootage?: string
+  // Step 3 — Full length + length source (when No)
+  fullyInspected?: "Yes" | "No"
+  estimatedLength?: string
+  lengthSource?: string
   // Step 7 — Characteristics
   characteristics?: CharRow[]
   // Stepper progress (1–8; 8 = complete)
@@ -185,9 +185,20 @@ interface Observation {
   // Direction change
   directionWhich?: string
   directionFitting?: string
-  // Pipe transition
+  // Pipe transition / boundary
   pipeType?: string
   pipeSize?: string
+  // Camera stoppage locate
+  stoppageDepth?: string
+  stoppageSurface?: string
+  stoppageUnitNumbers?: string
+  stoppageOwnership?: string
+  stoppageSurfaceMarked?: string
+  stoppageLocateClose?: boolean
+  stoppageLocateWide?: boolean
+  stoppageEstimatorNotes?: string
+  // Obscured range
+  viewObscured?: boolean
   // Common
   notes?: string
   // CIPP concern
@@ -199,6 +210,12 @@ interface Observation {
   cippLocateWide?: boolean
   cippAboveGround?: string
   cippNotes?: string
+  // Camera-stoppage locate
+  stopLocateDepth?: string
+  stopLocateAboveGround?: string
+  stopLocateOwnership?: string
+  stopLocateSurfaceMarked?: string
+  stopLocateEstimatorNotes?: string
 }
 
 // ── Visit / Session types ──────────────────────────────────────────────────────
@@ -247,6 +264,20 @@ interface VisitLogEntry {
   text: string
   recordType?: "asset" | "pipe" | "inspection" | "observation" | "media" | "logistics" | "contact"
   recordId?: string
+}
+
+interface SiteMapData {
+  sourceUrl: string
+  imageW: number
+  imageH: number
+  lengthPts: [number, number, number, number]
+  widthPts: [number, number, number, number]
+  lengthFt: number
+  widthFt: number
+  scale: number
+  viewName: string
+  viewRect: { x: number; y: number; w: number; h: number }
+  uploadedAt: string
 }
 
 interface Visit {
@@ -533,6 +564,7 @@ const OBS_COLOR: Record<ObsType, string> = {
   "pipe-transition": "#00803E",
   "start-of-pipe": "#0369A1",
   "end-of-pipe": "#0369A1",
+  "camera-stoppage": "#38424E",
 }
 
 const OBS_LABEL: Record<ObsType, string> = {
@@ -543,6 +575,7 @@ const OBS_LABEL: Record<ObsType, string> = {
   "pipe-transition": "PIPE TRANSITION",
   "start-of-pipe": "START OF PIPE",
   "end-of-pipe": "END OF PIPE",
+  "camera-stoppage": "CAMERA STOPPAGE",
 }
 
 const SEV_LABEL = ["", "MINOR", "LIGHT", "MODERATE", "SEVERE", "URGENT"]
@@ -558,7 +591,7 @@ const CHOOSER_OPTIONS: { type: ObsType; label: string; desc: string }[] = [
 
 const TIE_SUBTYPES = ["Wye", "Tee", "Double wye", "Double tee"]
 const TIE_SIZES = ['2"', '3"', '4"', '6"', '8"', '10"']
-const DEFECT_SUBTYPES = ["Crack", "Roots", "Roots through crack", "Hole", "Offset", "Sagging", "Complete collapse", "Grease", "Scale", "Broken pipe", "Missing bottom"]
+const DEFECT_SUBTYPES = ["Crack", "Roots", "Roots through crack", "Hole", "Offset", "Sagging", "Complete collapse", "Grease", "Scale", "Standing water", "Sediment or debris", "Broken pipe", "Missing bottom"]
 const DEPTH_BANDS = ["0–4 ft", "4–6 ft", "6–8 ft", "8 ft +"]
 const SURFACES = ["Dirt / gravel", "Landscaping / sod", "Asphalt", "Concrete slab", "Finished floor"]
 const EQUIPMENT_ACCESS = ["Mini-excavator can reach it", "Skid steer only", "Hand dig — no machine access"]
@@ -588,6 +621,31 @@ const WHY_STOPPED_OPTIONS = [
   "Pipe too small for the head",
   "Other",
 ]
+const REACHED_REASONS = new Set([
+  "Reached the next pipe or structure",
+  "Reached a connection to the city main",
+  "Reached another accessible clean-out",
+  "Reached a basin or manhole",
+  "Reached a 90° fitting — end of the pipe",
+  "Reached a septic tank or lift station",
+])
+function fullLengthPrefill(reason: string): "Yes" | "No" | "" {
+  if (REACHED_REASONS.has(reason)) return "Yes"
+  if (reason === "Other" || !reason) return ""
+  return "No"
+}
+function preferredEndType(reason: string): "end-of-pipe" | "camera-stoppage" | "either" {
+  if (REACHED_REASONS.has(reason)) return "end-of-pipe"
+  if (reason && reason !== "Other") return "camera-stoppage"
+  return "either"
+}
+const LENGTH_SOURCE_OPTIONS = [
+  "Located the far end with the sonde",
+  "Map distance between access points",
+  "Plan drawing or as-built",
+  "Far access point is visible — paced it",
+  "Assumed from building layout",
+]
 const NOT_FULLY_REASON_OPTIONS = [
   "Camera did not reach the end",
   "Heavy grease obscured the view",
@@ -599,6 +657,7 @@ const NOT_FULLY_REASON_OPTIONS = [
   "Section skipped — could not hold position",
   "Other",
 ]
+
 const ABOVE_GROUND_OPTIONS = [
   "Hallway", "Lobby or finished space", "Living Space(s)", "Basement", "Storage units",
   "Laundry room", "Mechanical room", "Crawlspace", "Garage or parking deck",
@@ -874,10 +933,20 @@ function PipeProfileSVG({ video, pipe, onClickObs }: {
   if (!ticks.includes(totalFt)) ticks.push(totalFt)
 
   const hasCipp = staggered.some(s => s.obs.cippConcern)
-  const assessFt = video.fullyInspected !== "Yes" && video.assessableFootage ? parseFloat(video.assessableFootage) : null
+  const cameraStoppage = video.observations.find(o => o.type === "camera-stoppage")
+  const cameraStopFt = cameraStoppage ? parseFloat(cameraStoppage.footage || "0") : null
+  const obscuredSections = video.observations.filter(o => o.viewObscured && o.footageTo)
+  const obscuredRanges = obscuredSections
+    .map(o => ({ s: parseFloat(o.footage || "0"), e: parseFloat(o.footageTo || "0") }))
+  const hasObscured = obscuredSections.length > 0
 
   return (
     <svg viewBox="0 0 940 440" width="100%" style={{ display: "block", fontFamily: "system-ui, sans-serif" }}>
+      <defs>
+        <pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="6" stroke="#94A3B8" strokeWidth="2" />
+        </pattern>
+      </defs>
 
       {/* LANE 1 — ABOVE */}
       <text x="48" y="62" fontSize="11" fill="#5F6E7C" textAnchor="end">ABOVE</text>
@@ -934,6 +1003,17 @@ function PipeProfileSVG({ video, pipe, onClickObs }: {
           </g>
         )
       })}
+      {/* Hatched overlay — obscured sections */}
+      {obscuredSections.map(obs => {
+        const sx = ftToX(parseFloat(obs.footage || "0"))
+        const ex = ftToX(parseFloat(obs.footageTo || obs.footage || "0"))
+        return (
+          <g key={obs.id}>
+            <rect x={sx} y={158} width={Math.max(0, ex - sx)} height={24} fill="url(#hatch-obscured)" />
+            <rect x={sx} y={48} width={Math.max(0, ex - sx)} height={26} fill="rgba(169,107,0,0.06)" />
+          </g>
+        )
+      })}
       {/* Access point start */}
       <circle cx={X0} cy={170} r="9" fill="#FFFFFF" stroke="#1F2933" strokeWidth="2.5" />
       <rect x={X0 - 4} y={166} width={8} height={8} fill="#1F2933" />
@@ -945,12 +1025,17 @@ function PipeProfileSVG({ video, pipe, onClickObs }: {
       <line x1={X1 + 4} y1={170} x2={X1 + 14} y2={170} stroke="#16202A" strokeWidth="2" />
       <path d={`M${X1 + 18} 170 l-10 -5 v10 z`} fill="#16202A" />
 
-      {/* Partial dashed overlay */}
-      {assessFt !== null && assessFt < totalFt && (
+      {/* Obscured sections — hatched over pipe lane */}
+      {obscuredRanges.map((r, i) => (
+        <rect key={i} x={ftToX(r.s)} y={158} width={Math.max(0, ftToX(r.e) - ftToX(r.s))} height={24} fill="url(#hatch)" opacity={0.6} />
+      ))}
+      {/* Camera stoppage — dashed overlay from stoppage to run end */}
+      {cameraStopFt !== null && cameraStopFt < totalFt && (
         <>
-          <rect x={ftToX(assessFt)} y={48} width={ftToX(totalFt) - ftToX(assessFt)} height={26} fill="rgba(248,250,252,0.75)" stroke="#D2DAE2" strokeDasharray="4 3" />
-          <rect x={ftToX(assessFt)} y={158} width={ftToX(totalFt) - ftToX(assessFt)} height={24} fill="rgba(198,207,216,0.35)" stroke="#D2DAE2" strokeDasharray="4 3" />
-          <text x={(ftToX(assessFt) + X1) / 2} y={172} fontSize="10" fill="#94A3B8" textAnchor="middle">? ft</text>
+          <rect x={ftToX(cameraStopFt)} y={158} width={ftToX(totalFt) - ftToX(cameraStopFt)} height={24} fill="#F1F5F9" stroke="#94A3B8" strokeDasharray="5 4" strokeWidth="1" />
+          <text x={(ftToX(cameraStopFt) + X1) / 2} y={173} fontSize="10" fill="#94A3B8" textAnchor="middle" fontStyle="italic">not inspected</text>
+          <line x1={ftToX(cameraStopFt)} y1={152} x2={ftToX(cameraStopFt)} y2={188} stroke="#38424E" strokeWidth="1.5" strokeDasharray="3 2" />
+          <text x={ftToX(cameraStopFt)} y={148} fontSize="10" fill="#38424E" textAnchor="middle" fontWeight="600">◉</text>
         </>
       )}
 
@@ -1006,6 +1091,7 @@ function PipeProfileSVG({ video, pipe, onClickObs }: {
         <rect x={362} y={404} width={12} height={12} fill="#CE1A74" /><text x={380} y={414}>Critical</text>
         <rect x={440} y={404} width={12} height={12} fill="#FBE3EF" stroke="#CE1A74" /><text x={458} y={414}>Municipal</text>
         {hasCipp && <><circle cx={535} cy={410} r={4} fill="#CE1A74" /><text x={545} y={414}>CIPP concern</text></>}
+        {hasObscured && <><rect x={hasCipp ? 640 : 535} y={404} width={12} height={12} fill="url(#hatch-obscured)" stroke="#A96B0055" /><text x={hasCipp ? 658 : 553} y={414}>Obscured — passed through</text></>}
       </g>
     </svg>
   )
@@ -1372,6 +1458,22 @@ export default function App() {
     assetId: string; slotIdx: number
     photos: { src: string; obsId: string; observedAt: number; observedById: string }[]
   } | null>(null) // photo history viewer for a slot
+  const [siteMap, setSiteMap] = useState<SiteMapData | null>(null)
+  const [mapSetup, setMapSetup] = useState<{
+    img: string | null
+    rot: number
+    zoom: number
+    len: { a: { x: number; y: number } | null; b: { x: number; y: number } | null; ft: string; inches: string; confirmed: boolean }
+    wid: { a: { x: number; y: number } | null; b: { x: number; y: number } | null; ft: string; inches: string; confirmed: boolean }
+    msMode: "len" | "wid" | "view" | null
+    msDrag: { t: string; m?: string; k?: string; ox?: number; oy?: number; px?: number; py?: number; fx?: number; fy?: number; e?: string } | null
+    cursor: { x: number; y: number } | null
+    view: { x: number; y: number; w: number; h: number } | null
+    viewName: string
+    done: boolean
+    changeViewOnly: boolean
+  } | null>(null)
+  const mapWrapRef = useRef<HTMLDivElement>(null)
   const [mapImage, setMapImage] = useState<string | null>(null)
   const [mapImageProps, setMapImageProps] = useState({ x: 10, y: 10, w: 60, h: 60, rotation: 0, opacity: 0.85 })
   const [showMapMenu, setShowMapMenu] = useState(false)
@@ -1400,7 +1502,7 @@ export default function App() {
   const [hoverPipeId, setHoverPipeId] = useState<string | null>(null)
   const [leftPanelOpen, setLeftPanelOpen] = useState(true)
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
-  const [leftSectionOpen, setLeftSectionOpen] = useState({ infra: false, assets: false, pipes: false, visits: false, archived: false })
+  const [leftSectionOpen, setLeftSectionOpen] = useState({ map: true, infra: false, assets: false, pipes: false, visits: false, archived: false })
   // ── Visit / session state ───────────────────────────────────────────────────
   const [appView, setAppView] = useState<"launch" | "simd">("launch")
   const [browseMode, setBrowseMode] = useState(false)
@@ -1494,9 +1596,11 @@ export default function App() {
   // Stepper state
   const [editingStep, setEditingStep] = useState<number | null>(null)
   const [step1Form, setStep1Form] = useState({ launchedFrom: "", direction: "downstream" as "upstream"|"downstream", zeroRef: "At the pipe entry" })
-  const [step3Form, setStep3Form] = useState({ whyStopped: "", stopFootage: "0", fullyInspected: "" as "Yes"|"Partially"|"No"|"", notFullyReason: "", assessableFootage: "0", stopNotes: "" })
+  const [step3Form, setStep3Form] = useState({ whyStopped: "", stopFootage: "0", fullyInspected: "" as "Yes"|"No"|"", estimatedLength: "", lengthSource: "", stopNotes: "" })
+  const [cameraStoppageForm, setCameraStoppageForm] = useState({ depth: "", aboveGround: "", ownership: "", surfaceMarked: "", estimatorNotes: "" })
   const [startPipeForm, setStartPipeForm] = useState({ pipeType: "", pipeSize: "" })
   const [endPipeForm, setEndPipeForm] = useState({ pipeType: "", pipeSize: "" })
+  const [cameraStopForm, setCameraStopForm] = useState({ pipeType: "", pipeSize: "", depth: "", surface: "", unitNumbers: "", ownership: "", surfaceMarked: "", estimatorNotes: "" })
   const [startPipeSaved, setStartPipeSaved] = useState<string | null>(null) // videoId of saved start
   const [endPipeSaved, setEndPipeSaved] = useState<string | null>(null)   // videoId of saved end
   const [obsStepMismatch, setObsStepMismatch] = useState<{ startType: string; startSize: string; endType: string; endSize: string; stopFt: string } | null>(null)
@@ -1645,7 +1749,7 @@ export default function App() {
     setEndPipeForm({ pipeType: eopObs?.pipeType ?? "", pipeSize: eopObs?.pipeSize ?? "" })
     setStartPipeSaved(sopObs ? selectedVideoId : null)
     setEndPipeSaved(eopObs ? selectedVideoId : null)
-    setStep3Form({ whyStopped: vid.whyStopped ?? "", stopFootage: vid.stopFootage ?? "0", fullyInspected: (vid.fullyInspected ?? "") as "Yes"|"Partially"|"No"|"", notFullyReason: vid.notFullyReason ?? "", assessableFootage: vid.assessableFootage ?? "0", stopNotes: vid.stopNotes ?? "" })
+    setStep3Form({ whyStopped: vid.whyStopped ?? "", stopFootage: vid.stopFootage ?? "0", fullyInspected: (vid.fullyInspected ?? "") as "Yes"|"No"|"", estimatedLength: vid.estimatedLength ?? "", lengthSource: vid.lengthSource ?? "", stopNotes: vid.stopNotes ?? "" })
     const chars = vid.characteristics
     if (chars && chars.length > 0) {
       setStep7Rows(chars)
@@ -3095,27 +3199,57 @@ export default function App() {
         {/* Scrollable sections container */}
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
 
-        {/* Map upload */}
-        <Section>
-          <Label>Property Map</Label>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            style={{
-              width: "100%", padding: "8px 12px", borderRadius: 5, fontSize: 10, cursor: "pointer",
-              background: mapImage ? "#DCFAF3" : C.card,
-              border: `1px dashed ${mapImage ? C.cyan : C.border}`,
-              color: mapImage ? C.cyan : C.muted,
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            }}
-          >
-            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-              <path d="M6.5 1v7M4 3l2.5-2.5L9 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-              <path d="M1 9.5v1.5a1 1 0 001 1h9a1 1 0 001-1V9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        {/* Map section */}
+        <Section style={{ paddingBottom: leftSectionOpen.map ? undefined : 0 }}>
+          <button onClick={() => setLeftSectionOpen(s => ({ ...s, map: !s.map }))} style={{ display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",background:"none",borderTop:"none",borderRight:"none",borderBottom:"none",borderLeft:"none",cursor:"pointer",padding:0,marginBottom:leftSectionOpen.map ? 10 : 0 }}>
+            <div style={{ fontSize:9, fontWeight:700, color:C.muted, letterSpacing:"0.09em", textTransform:"uppercase" }}>Map</div>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ transform: leftSectionOpen.map ? "rotate(0deg)" : "rotate(-90deg)", transition:"transform 0.15s", flexShrink:0 }}>
+              <path d="M2 4l4 4 4-4" stroke={C.muted} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-            {mapImage ? "Map loaded ✓" : "Upload site plan / aerial"}
           </button>
-          <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleMapUpload} />
+          {leftSectionOpen.map && (
+            <>
+              {!siteMap ? (
+                <>
+                  <div style={{ fontSize:10, color:C.dim, marginBottom:8 }}>No map yet.</div>
+                  <button onClick={() => setMapSetup({ img:null, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })}
+                    style={{ width:"100%", padding:"8px 10px", fontSize:10, fontWeight:600, background:C.card, color:C.cyan, border:`1.5px solid ${C.cyan}44`, borderRadius:5, cursor:"pointer" }}>
+                    + Add new map
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize:11, fontWeight:600, color:C.text, marginBottom:2 }}>Site plan</div>
+                  <div style={{ fontSize:9.5, color:C.dim, marginBottom:10 }}>Uploaded · {siteMap.uploadedAt}</div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:10 }}>
+                    <div>
+                      <div style={{ fontSize:8, fontWeight:700, color:C.muted, letterSpacing:"0.09em", textTransform:"uppercase", marginBottom:2 }}>Scale</div>
+                      <div style={{ fontSize:10, color:C.text, fontFamily:"JetBrains Mono" }}>{siteMap.scale.toFixed(3)} ft/px · {siteMap.lengthFt} ft × {siteMap.widthFt} ft measured</div>
+                    </div>
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                      <div>
+                        <div style={{ fontSize:8, fontWeight:700, color:C.muted, letterSpacing:"0.09em", textTransform:"uppercase", marginBottom:2 }}>View</div>
+                        <div style={{ fontSize:10, color:C.text }}>{siteMap.viewName}</div>
+                      </div>
+                      <button onClick={() => setMapSetup({ img:siteMap.sourceUrl, rot:0, zoom:1, len:{a:{x:siteMap.lengthPts[0]*100,y:siteMap.lengthPts[1]*100},b:{x:siteMap.lengthPts[2]*100,y:siteMap.lengthPts[3]*100},ft:String(siteMap.lengthFt),inches:"",confirmed:true}, wid:{a:{x:siteMap.widthPts[0]*100,y:siteMap.widthPts[1]*100},b:{x:siteMap.widthPts[2]*100,y:siteMap.widthPts[3]*100},ft:String(siteMap.widthFt),inches:"",confirmed:true}, msMode:"view", msDrag:null, cursor:null, view:{x:siteMap.viewRect.x*100,y:siteMap.viewRect.y*100,w:siteMap.viewRect.w*100,h:siteMap.viewRect.h*100}, viewName:siteMap.viewName, done:false, changeViewOnly:true })}
+                        style={{ fontSize:9.5, fontWeight:600, color:C.cyan, background:"none", border:`1px solid ${C.border}`, borderRadius:4, padding:"3px 8px", cursor:"pointer", flexShrink:0 }}>
+                        Change view
+                      </button>
+                    </div>
+                    <button onClick={() => window.open(siteMap.sourceUrl, "_blank")}
+                      style={{ width:"100%", padding:"6px", fontSize:9.5, color:C.muted, background:"none", border:`1px solid ${C.border}`, borderRadius:4, cursor:"pointer" }}>
+                      View source image
+                    </button>
+                  </div>
+                  <div style={{ fontSize:9, color:C.dim, fontStyle:"italic", lineHeight:1.5, borderTop:`1px solid ${C.border}`, paddingTop:8 }}>
+                    Measurements are locked once set. Assets and pipe paths are positioned against this scale.
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </Section>
+        <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleMapUpload} />
 
         {/* Add infrastructure */}
         <Section style={{ paddingBottom: leftSectionOpen.infra ? undefined : 0 }}>
@@ -5870,14 +6004,10 @@ export default function App() {
                     const sv = sourceVideo
                     const completenessLine = (() => {
                       if (sv.fullyInspected === "Yes") {
-                        return <span style={{ color: "#00803E" }}>Fully inspected{sv.whyStopped ? ` · ${sv.whyStopped.toLowerCase()}` : ""}</span>
-                      }
-                      if (sv.fullyInspected === "Partially") {
-                        const aft = sv.assessableFootage ? `${sv.assessableFootage} of ${sv.stopFootage || "?"} ft assessable` : ""
-                        return <span style={{ color: "#A96B00" }}>Partially inspected{sv.notFullyReason ? ` — ${sv.notFullyReason.toLowerCase()}` : ""}{aft ? ` · ${aft}` : ""}</span>
+                        return <span style={{ color: "#00803E" }}>Full length inspected{sv.whyStopped ? ` · ${sv.whyStopped.toLowerCase()}` : ""}</span>
                       }
                       if (sv.fullyInspected === "No") {
-                        return <span style={{ color: "#A96B00" }}>Not fully inspected{sv.notFullyReason ? ` — ${sv.notFullyReason.toLowerCase()}` : ""}</span>
+                        return <span style={{ color: "#A96B00" }}>Did not reach the end{sv.estimatedLength ? ` · est. ${sv.estimatedLength} ft total` : ""}</span>
                       }
                       return <span style={{ color: C.dim, fontStyle: "italic" }}>Inspection in progress</span>
                     })()
@@ -6292,7 +6422,10 @@ export default function App() {
               const cippMissing = sv.observations.filter(o => o.cippConcern && (!o.cippDepth || !o.cippLocateClose || !o.cippLocateWide)).length
               const hasStartOfPipe = sv.observations.some(o => o.type === "start-of-pipe")
               const hasEndOfPipe = sv.observations.some(o => o.type === "end-of-pipe")
-              const step5Complete = sv.observationsClosed && cippMissing === 0 && hasStartOfPipe && hasEndOfPipe
+              const hasCameraStoppage = sv.observations.some(o => o.type === "camera-stoppage")
+              const hasEndBoundary = hasEndOfPipe || hasCameraStoppage
+              const step5Complete = sv.observationsClosed && cippMissing === 0 && hasStartOfPipe && hasEndBoundary
+              const stopPreference = preferredEndType(sv.whyStopped ?? "")
 
               return (
               <div style={{ borderTop: `2px solid ${C.border}` }}>
@@ -6378,14 +6511,18 @@ export default function App() {
                 <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(3) ? 0.45 : 1 }}>
                   {stepHdr(3, (() => {
                     const parts = [sv.whyStopped, sv.stopFootage ? `stopped at ${fmtFtIn(sv.stopFootage)}` : ""].filter(Boolean)
-                    if (sv.fullyInspected) parts.push(sv.fullyInspected === "Yes" ? "fully inspected" : sv.fullyInspected === "Partially" ? "partially inspected" : "not fully inspected")
+                    if (sv.fullyInspected) parts.push(sv.fullyInspected === "Yes" ? "full length inspected" : "did not reach the end")
                     return parts.join(" · ") || undefined
                   })())}
                   {isActive(3) && (
                     <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
                       <div>
                         <FieldLabel text="WHY THE CAMERA STOPPED *" />
-                        <select value={step3Form.whyStopped} onChange={e => setStep3Form(f => ({ ...f, whyStopped: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                        <select value={step3Form.whyStopped} onChange={e => {
+                          const r = e.target.value
+                          const pf = fullLengthPrefill(r)
+                          setStep3Form(f => ({ ...f, whyStopped: r, fullyInspected: pf || f.fullyInspected }))
+                        }} style={{ ...inputSt, paddingRight: 8 }}>
                           <option value="">— select —</option>
                           {WHY_STOPPED_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
                         </select>
@@ -6396,26 +6533,36 @@ export default function App() {
                       </div>
                       <div style={{ borderTop: `1px solid ${C.border}`, margin: "2px 0" }} />
                       <div>
-                        <FieldLabel text="WAS THE PIPE FULLY INSPECTED? *" />
+                        <FieldLabel text="WAS THE FULL LENGTH OF THE PIPE INSPECTED? *" />
                         <div style={{ display: "flex", gap: 6 }}>
-                          {(["Yes","Partially","No"] as const).map(v => (
-                            <button key={v} onClick={() => setStep3Form(f => ({ ...f, fullyInspected: v }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step3Form.fullyInspected === v ? (v === "Yes" ? "#E8F4EF" : v === "No" ? "#FEF2F2" : "#FFFBF0") : C.card, color: step3Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.muted, border: `1.5px solid ${step3Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.border}` }}>{v}</button>
+                          {(["Yes","No"] as const).map(v => (
+                            <button key={v} onClick={() => setStep3Form(f => ({ ...f, fullyInspected: v }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step3Form.fullyInspected === v ? (v === "Yes" ? "#E8F4EF" : "#FEF2F2") : C.card, color: step3Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : "#DC2626") : C.muted, border: `1.5px solid ${step3Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : "#DC2626") : C.border}` }}>{v}</button>
                           ))}
                         </div>
                       </div>
-                      {step3Form.fullyInspected && step3Form.fullyInspected !== "Yes" && (
+                      {step3Form.fullyInspected === "No" && (
                         <>
-                          <div>
-                            <FieldLabel text="WHY NOT FULLY INSPECTED *" />
-                            <select value={step3Form.notFullyReason} onChange={e => setStep3Form(f => ({ ...f, notFullyReason: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
-                              <option value="">— select —</option>
-                              {NOT_FULLY_REASON_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-                            </select>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                            <div>
+                              <FieldLabel text="ESTIMATED TOTAL LENGTH *" />
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <input type="number" value={step3Form.estimatedLength} onChange={e => setStep3Form(f => ({ ...f, estimatedLength: e.target.value }))} style={{ ...inputSt, width: 64 }} placeholder="ft" />
+                                <span style={{ fontSize: 10, color: C.muted }}>ft</span>
+                              </div>
+                            </div>
+                            <div>
+                              <FieldLabel text="HOW DO YOU KNOW? *" />
+                              <select value={step3Form.lengthSource} onChange={e => setStep3Form(f => ({ ...f, lengthSource: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                <option value="">— select —</option>
+                                {LENGTH_SOURCE_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                              </select>
+                            </div>
                           </div>
-                          <div>
-                            <FieldLabel text="FOOTAGE ACTUALLY ASSESSABLE" />
-                            <FootageRow footage={step3Form.assessableFootage} onChange={v => setStep3Form(f => ({ ...f, assessableFootage: v }))} />
-                          </div>
+                          {step3Form.lengthSource === "Assumed from building layout" && (
+                            <div style={{ padding: "8px 10px", borderRadius: 5, background: "#FFFBF0", border: "1px solid #F59E0B44", fontSize: 9.5, color: "#92400E", lineHeight: 1.45 }}>
+                              ⚠ An assumed length must not be used to order materials. Locate the far end before quoting full-length work.
+                            </div>
+                          )}
                         </>
                       )}
                       <div>
@@ -6423,9 +6570,9 @@ export default function App() {
                         <textarea value={step3Form.stopNotes} onChange={e => setStep3Form(f => ({ ...f, stopNotes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Any detail about what stopped the camera…" />
                       </div>
                       <button
-                        disabled={!step3Form.whyStopped || !step3Form.stopFootage || !step3Form.fullyInspected || (step3Form.fullyInspected !== "Yes" && !step3Form.notFullyReason)}
-                        onClick={() => { updateVideo({ whyStopped: step3Form.whyStopped, stopFootage: step3Form.stopFootage, fullyInspected: step3Form.fullyInspected as "Yes"|"Partially"|"No", notFullyReason: step3Form.notFullyReason, assessableFootage: step3Form.assessableFootage, stopNotes: step3Form.stopNotes, inspStep: Math.max(step, 4) }); setEditingStep(null) }}
-                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: (step3Form.whyStopped && step3Form.stopFootage && step3Form.fullyInspected && (step3Form.fullyInspected === "Yes" || step3Form.notFullyReason)) ? "#16202A" : C.card, color: (step3Form.whyStopped && step3Form.stopFootage && step3Form.fullyInspected && (step3Form.fullyInspected === "Yes" || step3Form.notFullyReason)) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
+                        disabled={!step3Form.whyStopped || !step3Form.stopFootage || !step3Form.fullyInspected || (step3Form.fullyInspected === "No" && (!step3Form.estimatedLength || !step3Form.lengthSource))}
+                        onClick={() => { updateVideo({ whyStopped: step3Form.whyStopped, stopFootage: step3Form.stopFootage, fullyInspected: step3Form.fullyInspected as "Yes"|"No", estimatedLength: step3Form.estimatedLength, lengthSource: step3Form.lengthSource, stopNotes: step3Form.stopNotes, inspStep: Math.max(step, 4) }); setEditingStep(null) }}
+                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: (step3Form.whyStopped && step3Form.stopFootage && step3Form.fullyInspected && (step3Form.fullyInspected === "Yes" || (step3Form.estimatedLength && step3Form.lengthSource))) ? "#16202A" : C.card, color: (step3Form.whyStopped && step3Form.stopFootage && step3Form.fullyInspected && (step3Form.fullyInspected === "Yes" || (step3Form.estimatedLength && step3Form.lengthSource))) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
                       >
                         {editingStep === 3 ? "Save Changes" : "Next →"}
                       </button>
@@ -6456,7 +6603,7 @@ export default function App() {
 
                 {/* ── Step 5 — Sewer camera analysis ────────────────────────── */}
                 <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(5) ? 0.45 : 1 }}>
-                  {stepHdr(5, `${sv.observations.filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe").length} obs.${cippCount ? ` · ${cippCount} CIPP concern${cippCount !== 1 ? "s" : ""}` : ""}${hasStartOfPipe && hasEndOfPipe ? "" : " · start/end required"}`)}
+                  {stepHdr(5, `${sv.observations.filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe" && o.type !== "camera-stoppage").length} obs.${cippCount ? ` · ${cippCount} CIPP concern${cippCount !== 1 ? "s" : ""}` : ""}${hasStartOfPipe && hasEndBoundary ? "" : " · start/end required"}`)}
                   {isActive(5) && (
                     <div>
                       {/* START OF PIPE gate */}
@@ -6652,8 +6799,21 @@ export default function App() {
                     {captureStep === "defect" && (
                       <div style={{ padding: "14px 14px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
                         <div style={{ fontSize: 11, fontWeight: 700, color: "#A96B00", letterSpacing: "0.1em", textTransform: "uppercase" }}>DEFECT</div>
-                        <FootageRow footage={String(captureForm.footage ?? "")} footageTo={String(captureForm.footageTo ?? "")} onChange={v => setCaptureForm(f => ({ ...f, footage: v }))} onChangeTo={v => setCaptureForm(f => ({ ...f, footageTo: v }))} />
-                        <ChipField label="TYPE *" options={DEFECT_SUBTYPES} value={String(captureForm.defectSubtype ?? "")} onChange={v => setCaptureForm(f => ({ ...f, defectSubtype: v }))} color="#A96B00" />
+                        <FootageRow footage={String(captureForm.footage ?? "")} footageTo={String(captureForm.footageTo ?? "")} onChange={v => setCaptureForm(f => ({ ...f, footage: v }))} onChangeTo={v => {
+                          const sub = String(captureForm.defectSubtype ?? "")
+                          const autoObscure = ["Grease", "Scale", "Standing water", "Sediment or debris"].includes(sub)
+                          setCaptureForm(f => ({ ...f, footageTo: v, viewObscured: f.viewObscured !== undefined ? f.viewObscured : autoObscure }))
+                        }} />
+                        {!!captureForm.footageTo && (
+                          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 10.5, color: C.text }}>
+                            <input type="checkbox" checked={!!captureForm.viewObscured} onChange={e => setCaptureForm(f => ({ ...f, viewObscured: e.target.checked }))} style={{ accentColor: "#A96B00", width: 14, height: 14 }} />
+                            View obscured through this section
+                          </label>
+                        )}
+                        <ChipField label="TYPE *" options={DEFECT_SUBTYPES} value={String(captureForm.defectSubtype ?? "")} onChange={v => {
+                          const autoObscure = ["Grease", "Scale", "Standing water", "Sediment or debris"].includes(v)
+                          setCaptureForm(f => ({ ...f, defectSubtype: v, viewObscured: captureForm.footageTo ? (f.viewObscured !== undefined ? f.viewObscured : autoObscure) : f.viewObscured }))
+                        }} color="#A96B00" />
                         {captureForm.defectSubtype === "Complete collapse" ? (
                           <div style={{ padding: "10px 12px", borderRadius: 6, border: "1px solid #CE1A7444", background: "#FFF0F5", fontSize: 10.5, color: "#CE1A74", lineHeight: 1.5 }}>
                             <strong>A collapse rules out lining.</strong> Add an excavation point at this distance before you close the run. No orientation or severity needed — a collapse is the whole pipe.
@@ -6680,6 +6840,12 @@ export default function App() {
                               </div>
                             </div>
                           </>
+                        )}
+                        {!!captureForm.footageTo && (
+                          <label style={{ display: "flex", alignItems: "flex-start", gap: 7, cursor: "pointer" }}>
+                            <input type="checkbox" checked={!!captureForm.viewObscured} onChange={e => setCaptureForm(f => ({ ...f, viewObscured: e.target.checked }))} style={{ marginTop: 2 }} />
+                            <span style={{ fontSize: 10, color: C.text, lineHeight: 1.4 }}>View obscured through this section — the camera advanced but visibility was poor</span>
+                          </label>
                         )}
                         <div>
                           <FieldLabel text="NOTES" />
@@ -6768,13 +6934,13 @@ export default function App() {
                   <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>LOGGED ON THIS RUN
                     {cippMissing > 0 && <span style={{ marginLeft: 8, padding: "1px 6px", background: "#FEF2F2", color: "#DC2626", borderRadius: 3, fontSize: 8.5, fontWeight: 700 }}>{cippMissing} CIPP concern{cippMissing !== 1 ? "s" : ""} still need a locate</span>}
                   </div>
-                  {sv.observations.filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe").length === 0 ? (
+                  {sv.observations.filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe" && o.type !== "camera-stoppage").length === 0 ? (
                     <div style={{ fontSize: 11, color: C.dim, fontStyle: "italic" }}>Nothing logged yet.</div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                       {(() => {
                         const sorted = [...sv.observations]
-                          .filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe")
+                          .filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe" && o.type !== "camera-stoppage")
                           .sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
                         return sorted.map(obs => {
                           const col = OBS_COLOR[obs.type]
@@ -6811,55 +6977,146 @@ export default function App() {
                   )}
                 </div>}
 
-                {/* END OF PIPE gate */}
-                {hasStartOfPipe && (
-                  <div style={{ margin: "0 16px 12px", padding: "14px", borderRadius: 8, border: hasEndOfPipe ? "1.5px solid #00803E" : "1.5px solid #0369A1", background: hasEndOfPipe ? "#E8F4EF" : "#EFF8FF" }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: hasEndOfPipe ? "#00803E" : "#0369A1", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>
-                      {hasEndOfPipe ? "✓ END OF PIPE — saved" : "END OF PIPE — required to finish this step"}
-                    </div>
-                    {hasEndOfPipe ? (
-                      <div style={{ fontSize: 10, color: "#1A5C3A", lineHeight: 1.45 }}>
-                        {sv.observations.find(o => o.type === "end-of-pipe")?.pipeType} · {sv.observations.find(o => o.type === "end-of-pipe")?.pipeSize} at {sv.stopFootage ?? "—"} ft
-                        <button onClick={() => { updateVideo({ observations: sv.observations.filter(o => o.type !== "end-of-pipe") }); setEndPipeSaved(null) }} style={{ marginLeft: 8, fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer" }}>Edit</button>
+                {/* END BOUNDARY gate — End of pipe or Camera Stoppage */}
+                {hasStartOfPipe && (() => {
+                  const savedBoundary = sv.observations.find(o => o.type === "end-of-pipe" || o.type === "camera-stoppage")
+                  const activeTab = savedBoundary?.type ?? (stopPreference === "either" ? "end-of-pipe" : stopPreference)
+                  const eopGreyed = stopPreference === "camera-stoppage"
+                  const csGreyed = stopPreference === "end-of-pipe"
+                  return (
+                    <div style={{ margin: "0 16px 12px", borderRadius: 8, border: hasEndBoundary ? "1.5px solid #00803E" : "1.5px solid #0369A1", background: hasEndBoundary ? "#E8F4EF" : "#EFF8FF", overflow: "hidden" }}>
+                      {/* Tab row */}
+                      {!hasEndBoundary && (
+                        <div style={{ display: "flex", borderBottom: `1px solid #CBD5E1` }}>
+                          {(["end-of-pipe", "camera-stoppage"] as const).map(tab => {
+                            const greyed = tab === "end-of-pipe" ? eopGreyed : csGreyed
+                            const label = tab === "end-of-pipe" ? "End of pipe" : "Camera Stoppage"
+                            const isActive = activeTab === tab
+                            return (
+                              <div key={tab} style={{ flex: 1, padding: "8px 10px", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", cursor: greyed ? "default" : "pointer", color: greyed ? C.dim : isActive ? "#0369A1" : C.muted, borderBottom: isActive ? "2px solid #0369A1" : "2px solid transparent", background: isActive ? "#EFF8FF" : "transparent", opacity: greyed ? 0.5 : 1, textAlign: "center", transition: "all 0.1s" }}>
+                                {label}
+                                {greyed && <div style={{ fontSize: 8, fontWeight: 400, color: C.dim, marginTop: 2, lineHeight: 1.3 }}>{tab === "end-of-pipe" ? "Camera stopped before the end" : "Camera reached the end"}</div>}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                      <div style={{ padding: "12px 14px" }}>
+                        {hasEndBoundary ? (
+                          <div>
+                            <div style={{ fontSize: 10, fontWeight: 700, color: "#00803E", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>
+                              ✓ {savedBoundary!.type === "end-of-pipe" ? "END OF PIPE" : "CAMERA STOPPAGE"} — saved
+                            </div>
+                            <div style={{ fontSize: 10, color: "#1A5C3A", lineHeight: 1.45 }}>
+                              {savedBoundary!.type === "end-of-pipe"
+                                ? `${savedBoundary!.pipeType} · ${savedBoundary!.pipeSize} at ${sv.stopFootage ?? "—"} ft`
+                                : `Camera stopped at ${sv.stopFootage ?? "—"} ft — pipe continues`}
+                              <button onClick={() => { updateVideo({ observations: sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage") }); setEndPipeSaved(null) }} style={{ marginLeft: 8, fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer" }}>Edit</button>
+                            </div>
+                          </div>
+                        ) : activeTab === "end-of-pipe" ? (
+                          <>
+                            <div style={{ fontSize: 10, color: "#1E4D7B", lineHeight: 1.5, marginBottom: 10 }}>What the pipe is at {sv.stopFootage ?? "—"} ft, where the camera stopped.</div>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                              <div>
+                                <FieldLabel text="PIPE TYPE *" />
+                                <select value={endPipeForm.pipeType} onChange={e => setEndPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                  <option value="">Select…</option>
+                                  {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <FieldLabel text="PIPE SIZE *" />
+                                <select value={endPipeForm.pipeSize} onChange={e => setEndPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                  <option value="">Select…</option>
+                                  {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                              </div>
+                            </div>
+                            <div style={{ marginBottom: 10 }}>
+                              <FieldLabel text={`STILL AT ${sv.stopFootage ?? "—"} FT`} />
+                              <button style={{ width: "100%", padding: "7px", fontSize: 10, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
+                            </div>
+                            <button
+                              disabled={!endPipeForm.pipeType || !endPipeForm.pipeSize}
+                              onClick={() => {
+                                const newObs: Observation = { id: `eop-${Date.now()}`, type: "end-of-pipe", footage: sv.stopFootage ?? "9999", pipeType: endPipeForm.pipeType, pipeSize: endPipeForm.pipeSize }
+                                updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage"), newObs] })
+                                setEndPipeSaved(sv.id)
+                              }}
+                              style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: endPipeForm.pipeType && endPipeForm.pipeSize ? "pointer" : "default", background: endPipeForm.pipeType && endPipeForm.pipeSize ? "#0369A1" : C.card, color: endPipeForm.pipeType && endPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
+                            >
+                              Save end of pipe
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <div style={{ fontSize: 10, color: "#38424E", lineHeight: 1.5, marginBottom: 10 }}>The pipe continues past {sv.stopFootage ?? "—"} ft. Log a locate so an excavation can find the far end.</div>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                              <div>
+                                <FieldLabel text="DEPTH *" />
+                                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                  <input type="number" value={cameraStoppageForm.depth} onChange={e => setCameraStoppageForm(f => ({ ...f, depth: e.target.value }))} style={{ ...inputSt, width: 64 }} placeholder="ft" />
+                                  <span style={{ fontSize: 10, color: C.muted }}>ft</span>
+                                </div>
+                              </div>
+                              <div>
+                                <FieldLabel text="SURFACE MARKED *" />
+                                <select value={cameraStoppageForm.surfaceMarked} onChange={e => setCameraStoppageForm(f => ({ ...f, surfaceMarked: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                  <option value="">Select…</option>
+                                  {["Painted", "Marked on the photo", "Not marked"].map(o => <option key={o} value={o}>{o}</option>)}
+                                </select>
+                              </div>
+                            </div>
+                            <div style={{ marginBottom: 8 }}>
+                              <FieldLabel text="WHAT'S ABOVE *" />
+                              <select value={cameraStoppageForm.aboveGround} onChange={e => { const ag = e.target.value; setCameraStoppageForm(f => ({ ...f, aboveGround: ag, ownership: ownershipFor(ag) })) }} style={{ ...inputSt, paddingRight: 4 }}>
+                                <option value="">Select…</option>
+                                {ABOVE_GROUND_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                              </select>
+                            </div>
+                            {cameraStoppageForm.aboveGround && (
+                              <div style={{ marginBottom: 8 }}>
+                                <FieldLabel text="OWNERSHIP" />
+                                <div style={{ fontSize: 10.5, color: C.text, padding: "6px 0" }}>{cameraStoppageForm.ownership || ownershipFor(cameraStoppageForm.aboveGround)}</div>
+                              </div>
+                            )}
+                            {MUNICIPAL_SURFACES.includes(cameraStoppageForm.aboveGround) && (
+                              <div style={{ padding: "7px 10px", borderRadius: 5, background: "#FFFBF0", border: "1px solid #F59E0B44", fontSize: 9.5, color: "#92400E", marginBottom: 8, lineHeight: 1.4 }}>
+                                ⚠ This point is under municipal property. Excavation here means a permit, traffic control, and restoration to municipal spec.
+                              </div>
+                            )}
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                              <div>
+                                <FieldLabel text="PHOTO — CLOSE *" />
+                                <button style={{ width: "100%", padding: "7px", fontSize: 9.5, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
+                              </div>
+                              <div>
+                                <FieldLabel text="PHOTO — WIDE *" />
+                                <button style={{ width: "100%", padding: "7px", fontSize: 9.5, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
+                              </div>
+                            </div>
+                            <div style={{ marginBottom: 10 }}>
+                              <FieldLabel text="NOTES FOR THE ESTIMATOR" />
+                              <textarea value={cameraStoppageForm.estimatorNotes} onChange={e => setCameraStoppageForm(f => ({ ...f, estimatorNotes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} />
+                            </div>
+                            <button
+                              disabled={!cameraStoppageForm.depth || !cameraStoppageForm.aboveGround || !cameraStoppageForm.surfaceMarked}
+                              onClick={() => {
+                                const newObs: Observation = { id: `cs-${Date.now()}`, type: "camera-stoppage", footage: sv.stopFootage ?? "9999", stopLocateDepth: cameraStoppageForm.depth, stopLocateAboveGround: cameraStoppageForm.aboveGround, stopLocateOwnership: cameraStoppageForm.ownership || ownershipFor(cameraStoppageForm.aboveGround), stopLocateSurfaceMarked: cameraStoppageForm.surfaceMarked, stopLocateEstimatorNotes: cameraStoppageForm.estimatorNotes }
+                                updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage"), newObs] })
+                                setEndPipeSaved(sv.id)
+                              }}
+                              style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "pointer" : "default", background: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "#38424E" : C.card, color: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "#fff" : C.dim, border: "none" }}
+                            >
+                              Save camera stoppage
+                            </button>
+                          </>
+                        )}
                       </div>
-                    ) : (
-                      <>
-                        <div style={{ fontSize: 10, color: "#1E4D7B", lineHeight: 1.5, marginBottom: 12 }}>What the pipe is at {sv.stopFootage ?? "—"} ft, where the camera stopped.</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-                          <div>
-                            <FieldLabel text="PIPE TYPE *" />
-                            <select value={endPipeForm.pipeType} onChange={e => setEndPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                              <option value="">Select…</option>
-                              {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                            </select>
-                          </div>
-                          <div>
-                            <FieldLabel text="PIPE SIZE *" />
-                            <select value={endPipeForm.pipeSize} onChange={e => setEndPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                              <option value="">Select…</option>
-                              {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                          </div>
-                        </div>
-                        <div style={{ marginBottom: 10 }}>
-                          <FieldLabel text={`STILL AT ${sv.stopFootage ?? "—"} FT`} />
-                          <button style={{ width: "100%", padding: "7px", fontSize: 10, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
-                        </div>
-                        <button
-                          disabled={!endPipeForm.pipeType || !endPipeForm.pipeSize}
-                          onClick={() => {
-                            const newObs: Observation = { id: `eop-${Date.now()}`, type: "end-of-pipe", footage: sv.stopFootage ?? "9999", pipeType: endPipeForm.pipeType, pipeSize: endPipeForm.pipeSize }
-                            updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe"), newObs] })
-                            setEndPipeSaved(sv.id)
-                          }}
-                          style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: endPipeForm.pipeType && endPipeForm.pipeSize ? "pointer" : "default", background: endPipeForm.pipeType && endPipeForm.pipeSize ? "#0369A1" : C.card, color: endPipeForm.pipeType && endPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
-                        >
-                          Save end of pipe
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
+                    </div>
+                  )
+                })()}
                 </>}
 
                 {/* Step 5 footer */}
@@ -6873,10 +7130,10 @@ export default function App() {
                     </div>
                   )}
                   {!hasStartOfPipe && <div style={{ fontSize: 10, color: C.dim, fontStyle: "italic", textAlign: "center" }}>Save Start of pipe above to begin logging observations.</div>}
-                  {hasStartOfPipe && !hasEndOfPipe && sv.observationsClosed && <div style={{ fontSize: 10, color: "#0369A1" }}>Save End of pipe above to continue.</div>}
+                  {hasStartOfPipe && !hasEndBoundary && sv.observationsClosed && <div style={{ fontSize: 10, color: "#0369A1" }}>Save End of pipe or Camera Stoppage above to continue.</div>}
                   <button disabled={!step5Complete} onClick={() => {
                     if (!step5Complete) return
-                    // Check for start/end mismatch
+                    // Check for start/end mismatch (only when end-of-pipe, not camera-stoppage)
                     const sopObs = sv.observations.find(o => o.type === "start-of-pipe")
                     const eopObs = sv.observations.find(o => o.type === "end-of-pipe")
                     const hasTrans = sv.observations.some(o => o.type === "pipe-transition")
@@ -6884,6 +7141,7 @@ export default function App() {
                       setObsStepMismatch({ startType: sopObs.pipeType ?? "", startSize: sopObs.pipeSize ?? "", endType: eopObs.pipeType ?? "", endSize: eopObs.pipeSize ?? "", stopFt: sv.stopFootage ?? "—" })
                       return
                     }
+                    // Camera stoppage does not require mismatch check
                     updateVideo({ inspStep: Math.max(step, 6) }); setEditingStep(null)
                   }} style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", borderRadius: 6, cursor: step5Complete ? "pointer" : "default", background: step5Complete ? "#00803E" : C.card, color: step5Complete ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}>
                     Continue to Step 6 →
@@ -7770,6 +8028,428 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ── MAP SETUP WINDOW ─────────────────────────────────────────────────── */}
+      {mapSetup && (() => {
+        const ms = mapSetup
+        const MONO_F = "'JetBrains Mono','SF Mono',ui-monospace,monospace"
+
+        const msSpin = (p: { x: number; y: number }, r: number) =>
+          r === 90 ? { x: 100 - p.y, y: p.x } :
+          r === 180 ? { x: 100 - p.x, y: 100 - p.y } :
+          r === 270 ? { x: p.y, y: 100 - p.x } : { x: p.x, y: p.y }
+
+        const msUnspin = (p: { x: number; y: number }, r: number) =>
+          r === 90 ? { x: p.y, y: 100 - p.x } :
+          r === 180 ? { x: 100 - p.x, y: 100 - p.y } :
+          r === 270 ? { x: 100 - p.y, y: p.x } : { x: p.x, y: p.y }
+
+        const msBox = () => mapWrapRef.current?.getBoundingClientRect()
+
+        const msToPct = (e: React.MouseEvent) => {
+          const r = msBox(); if (!r) return null
+          return {
+            x: Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)),
+            y: Math.max(0, Math.min(100, ((e.clientY - r.top) / r.height) * 100)),
+          }
+        }
+
+        const msPxDist = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+          const r = msBox(); if (!r) return 0
+          const A = msSpin(a, ms.rot), B = msSpin(b, ms.rot)
+          return Math.hypot((A.x - B.x) / 100 * r.width, (A.y - B.y) / 100 * r.height)
+        }
+
+        const msTotalFt = (m: typeof ms.len) => (parseFloat(m.ft) || 0) + (parseFloat(m.inches) || 0) / 12
+
+        const msRatio = (m: typeof ms.len) => {
+          const px = m.a && m.b ? msPxDist(m.a, m.b) : 0
+          if (!px || !msTotalFt(m)) return null
+          return msTotalFt(m) / (px / ms.zoom)
+        }
+
+        const rL = ms.len.confirmed ? msRatio(ms.len) : null
+        const rW = ms.wid.confirmed ? msRatio(ms.wid) : null
+        const msScale = rL && rW ? (rL + rW) / 2 : null
+        const agree = rL && rW ? (Math.abs(rL - rW) / ((rL + rW) / 2)) * 100 : null
+        const bothDone = ms.len.confirmed && ms.wid.confirmed
+
+        const msUpload = (f: File) => {
+          const fr = new FileReader()
+          fr.onload = () => setMapSetup(s => s ? { ...s, img: fr.result as string } : null)
+          fr.readAsDataURL(f)
+        }
+
+        const msImgClick = (e: React.MouseEvent) => {
+          if (ms.done) return
+          const p = msToPct(e); if (!p) return
+          const u = msUnspin(p, ms.rot)
+          if (ms.msMode === "len") {
+            if (!ms.len.a) setMapSetup(s => s ? { ...s, len: { ...s.len, a: u } } : null)
+            else if (!ms.len.b) setMapSetup(s => s ? { ...s, len: { ...s.len, b: u } } : null)
+          } else if (ms.msMode === "wid") {
+            if (!ms.wid.a) setMapSetup(s => s ? { ...s, wid: { ...s.wid, a: u } } : null)
+            else if (!ms.wid.b) setMapSetup(s => s ? { ...s, wid: { ...s.wid, b: u } } : null)
+          }
+        }
+
+        const msStartMeasure = (which: "len" | "wid") => {
+          setMapSetup(s => {
+            if (!s) return null
+            if (which === "len") return { ...s, msMode: "len", len: { ...s.len, confirmed: false } }
+            return { ...s, msMode: "wid", wid: { ...s.wid, confirmed: false } }
+          })
+        }
+
+        const enterView = () => {
+          setMapSetup(s => s ? { ...s, msMode: "view", view: s.view ?? { x: 4, y: 4, w: 92, h: 92 } } : null)
+        }
+
+        const areaFt = (() => {
+          const r = msBox()
+          if (!ms.view || !msScale || !r) return null
+          return {
+            w: (ms.view.w / 100) * r.width / ms.zoom * msScale,
+            h: (ms.view.h / 100) * r.height / ms.zoom * msScale,
+          }
+        })()
+
+        const MeasureLine = ({ m, which, color }: { m: typeof ms.len; which: "len" | "wid"; color: string }) => {
+          if (!m.a) return null
+          const A = msSpin(m.a, ms.rot)
+          const B = m.b ? msSpin(m.b, ms.rot) : (ms.msMode === which && ms.cursor ? ms.cursor : null)
+          const live = ms.msMode === which
+          return (
+            <>
+              {B && (
+                <svg style={{ position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none", overflow:"visible" }}>
+                  <line x1={`${A.x}%`} y1={`${A.y}%`} x2={`${B.x}%`} y2={`${B.y}%`} stroke={color} strokeWidth="2" strokeDasharray={m.b ? "none" : "5 4"} />
+                </svg>
+              )}
+              {([["a", A], ["b", m.b ? msSpin(m.b, ms.rot) : null]] as const).map(([k, P]) => P && (
+                <div key={k}
+                  onMouseDown={e => { e.stopPropagation(); if (!ms.done && live) setMapSetup(s => s ? { ...s, msDrag: { t:"dot", m:which, k } } : null) }}
+                  style={{ position:"absolute", left:`${P.x}%`, top:`${P.y}%`, width:32, height:32, marginLeft:-16, marginTop:-16, display:"flex", alignItems:"center", justifyContent:"center", cursor:live && !ms.done ? "grab" : "default", zIndex:6 }}>
+                  <div style={{ width:11, height:11, borderRadius:99, background:color, border:"2px solid #0F1419" }} />
+                </div>
+              ))}
+              {m.b && m.confirmed && (() => {
+                const Bp = msSpin(m.b, ms.rot)
+                return (
+                  <div style={{ position:"absolute", left:`${(A.x + Bp.x)/2}%`, top:`${(A.y + Bp.y)/2}%`, transform:"translate(-50%,-50%)", background:"#0F1419DD", border:`1px solid ${color}`, borderRadius:4, padding:"2px 7px", fontFamily:MONO_F, fontSize:11, color, pointerEvents:"none", whiteSpace:"nowrap", zIndex:7 }}>
+                    {m.ft} ft{m.inches ? ` ${m.inches} in` : ""}
+                  </div>
+                )
+              })()}
+            </>
+          )
+        }
+
+        const MsSection = ({ title, m, which, color }: { title: string; m: typeof ms.len; which: "len" | "wid"; color: string }) => {
+          const placing = ms.msMode === which
+          const ready = m.a && m.b
+          const setM = (upd: Partial<typeof ms.len>) => setMapSetup(s => {
+            if (!s) return null
+            return which === "len" ? { ...s, len: { ...s.len, ...upd } } : { ...s, wid: { ...s.wid, ...upd } }
+          })
+          return (
+            <div style={{ padding:"12px 14px", borderBottom:`1px solid ${C.border}` }}>
+              <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:m.confirmed ? "#22C55E" : placing ? "#F59E0B" : C.dim, marginBottom:7 }}>{title}</div>
+              {m.confirmed ? (
+                <>
+                  <div style={{ fontFamily:MONO_F, fontSize:14, color:"#22C55E", marginBottom:3 }}>✓ {m.ft} ft{m.inches ? ` ${m.inches} in` : ""}</div>
+                  <div style={{ fontFamily:MONO_F, fontSize:10, color:C.dim, marginBottom:8 }}>{msRatio(m)?.toFixed(4)} ft/px</div>
+                  <button onClick={() => msStartMeasure(which)} disabled={ms.done} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Edit</button>
+                </>
+              ) : placing ? (
+                <>
+                  <div style={{ fontSize:11, color:"#F59E0B", lineHeight:1.5, marginBottom:9 }}>
+                    {!m.a ? "Tap the wall at one end." : !m.b ? "Now tap the other end." : "Type the distance from your map source."}
+                  </div>
+                  {ready && (
+                    <>
+                      <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+                        <div style={{ flex:2 }}>
+                          <div style={{ fontSize:9, color:C.dim, marginBottom:3 }}>FEET</div>
+                          <input value={m.ft} inputMode="decimal" placeholder="187" onChange={e => setM({ ft: e.target.value })} style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, color:C.text, borderRadius:5, padding:"7px 9px", fontSize:13, fontFamily:MONO_F, outline:"none", boxSizing:"border-box" }} />
+                        </div>
+                        <div style={{ flex:1 }}>
+                          <div style={{ fontSize:9, color:C.dim, marginBottom:3 }}>INCHES</div>
+                          <input value={m.inches} inputMode="numeric" placeholder="0" onChange={e => setM({ inches: e.target.value })} style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, color:C.text, borderRadius:5, padding:"7px 9px", fontSize:13, fontFamily:MONO_F, outline:"none", boxSizing:"border-box" }} />
+                        </div>
+                      </div>
+                      <div style={{ display:"flex", gap:6 }}>
+                        <button disabled={!msTotalFt(m)} onClick={() => { setM({ confirmed: true }); setMapSetup(s => s ? { ...s, msMode: null } : null) }} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"#22D3EE", color:"#06232B", border:"1px solid #22D3EE", borderRadius:6, cursor:!msTotalFt(m) ? "not-allowed" : "pointer", opacity:!msTotalFt(m) ? 0.32 : 1 }}>Confirm</button>
+                        <button onClick={() => { setM({ a:null, b:null, ft:"", inches:"", confirmed:false }); setMapSetup(s => s ? { ...s, msMode:null } : null) }} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Clear</button>
+                      </div>
+                    </>
+                  )}
+                  {!ready && (
+                    <button onClick={() => { setM({ a:null, b:null, ft:"", inches:"", confirmed:false }); setMapSetup(s => s ? { ...s, msMode:null } : null) }} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Cancel</button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize:11, color:C.dim, marginBottom:8 }}>Not measured</div>
+                  <button onClick={() => msStartMeasure(which)} disabled={!ms.img || ms.done} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>Start measuring</button>
+                </>
+              )}
+            </div>
+          )
+        }
+
+        return (
+          <div style={{ position:"fixed", inset:0, zIndex:500, background:"#0F1419", color:"#E8EDF2", fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif", display:"flex", flexDirection:"column" }}
+            onPaste={e => { const it = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith("image/")); if (it) msUpload(it.getAsFile()!) }}
+            onMouseMove={e => {
+              if (!ms.msDrag) return
+              const p = msToPct(e); if (!p) return
+              if (ms.msDrag.t === "dot") {
+                const u = msUnspin(p, ms.rot)
+                const k = ms.msDrag.k as "a" | "b"
+                if (ms.msDrag.m === "len") setMapSetup(s => s ? { ...s, len: { ...s.len, [k]: u } } : null)
+                else setMapSetup(s => s ? { ...s, wid: { ...s.wid, [k]: u } } : null)
+              }
+              if (ms.msDrag.t === "view-move" && ms.view) {
+                const ox = ms.msDrag.ox!, oy = ms.msDrag.oy!, px = ms.msDrag.px!, py = ms.msDrag.py!
+                setMapSetup(s => s && s.view ? { ...s, view: { ...s.view, x: Math.max(0, Math.min(100 - s.view.w, ox + (p.x - px))), y: Math.max(0, Math.min(100 - s.view.h, oy + (p.y - py))) } } : s)
+              }
+              if (ms.msDrag.t === "view-corner" && ms.view) {
+                const fx = ms.msDrag.fx!, fy = ms.msDrag.fy!
+                const x = Math.min(fx, p.x), y = Math.min(fy, p.y)
+                const w = Math.max(6, Math.abs(p.x - fx)), h = Math.max(6, Math.abs(p.y - fy))
+                setMapSetup(s => s ? { ...s, view: { x, y, w: Math.min(w, 100 - x), h: Math.min(h, 100 - y) } } : null)
+              }
+              if (ms.msDrag.t === "view-edge" && ms.view) {
+                const edge = ms.msDrag.e!
+                setMapSetup(s => {
+                  if (!s || !s.view) return s
+                  const v = s.view
+                  const n = { ...v }
+                  if (edge === "l") { const r = v.x + v.w; n.x = Math.min(p.x, r - 6); n.w = r - n.x }
+                  if (edge === "r") { n.w = Math.max(6, Math.min(p.x - v.x, 100 - v.x)) }
+                  if (edge === "t") { const b = v.y + v.h; n.y = Math.min(p.y, b - 6); n.h = b - n.y }
+                  if (edge === "b") { n.h = Math.max(6, Math.min(p.y - v.y, 100 - v.y)) }
+                  return { ...s, view: n }
+                })
+              }
+            }}
+            onMouseUp={() => setMapSetup(s => s ? { ...s, msDrag: null } : null)}>
+
+            {/* Title bar */}
+            <div style={{ height:46, borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", padding:"0 16px", gap:12, flexShrink:0 }}>
+              <span style={{ fontWeight:700, fontSize:14 }}>Set up the map</span>
+              {ms.changeViewOnly && <span style={{ color:"#8B97A5", fontSize:12 }}>Changing view only</span>}
+              {ms.done && <span style={{ marginLeft:"auto", color:"#22C55E", fontSize:12, fontWeight:700 }}>✓ FINALIZED</span>}
+              <button onClick={() => setMapSetup(null)} style={{ marginLeft:"auto", padding:"4px 12px", fontSize:10, fontWeight:700, background:"none", border:`1px solid ${C.border}`, borderRadius:5, color:C.muted, cursor:"pointer" }}>✕ Close</button>
+            </div>
+
+            <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
+
+              {/* Image area */}
+              <div style={{ flex:1, padding:20, display:"flex", alignItems:"center", justifyContent:"center", overflow:"auto", background:"#0B0F13" }}>
+                {!ms.img ? (
+                  <div onClick={() => { const inp = document.createElement("input"); inp.type="file"; inp.accept="image/*"; inp.onchange = (ev: Event) => { const f = (ev.target as HTMLInputElement).files?.[0]; if (f) msUpload(f) }; inp.click() }}
+                    onDragOver={e => e.preventDefault()}
+                    onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) msUpload(f) }}
+                    style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:60, textAlign:"center", cursor:"pointer", maxWidth:460 }}>
+                    <div style={{ fontSize:15, fontWeight:700, marginBottom:8 }}>Drop a map screenshot here</div>
+                    <div style={{ fontSize:12, color:"#8B97A5", lineHeight:1.6 }}>
+                      Click to browse, drag a file in, or paste from the clipboard.<br /><br />
+                      Screenshot the property from your county GIS viewer. Frame the whole property with a little margin.
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ position:"relative", transform:`scale(${ms.zoom})`, transformOrigin:"center", transition:ms.msDrag ? "none" : "transform 0.15s" }}>
+                    <div ref={mapWrapRef} onClick={msImgClick}
+                      onMouseMove={e => { const p = msToPct(e); if (p) setMapSetup(s => s ? { ...s, cursor: p } : null) }}
+                      onMouseLeave={() => setMapSetup(s => s ? { ...s, cursor: null } : null)}
+                      style={{ position:"relative", width:620, height:460, cursor:ms.msMode === "len" || ms.msMode === "wid" ? "crosshair" : "default", border:`1px solid ${C.border}` }}>
+                      <img src={ms.img} alt="" draggable={false} style={{ position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"contain", transform:`rotate(${ms.rot}deg)`, transformOrigin:"center", userSelect:"none", pointerEvents:"none" }} />
+
+                      {/* View overlay */}
+                      {ms.view && (
+                        <>
+                          {[
+                            { left:0, top:0, width:"100%", height:`${ms.view.y}%` },
+                            { left:0, top:`${ms.view.y + ms.view.h}%`, width:"100%", height:`${100 - ms.view.y - ms.view.h}%` },
+                            { left:0, top:`${ms.view.y}%`, width:`${ms.view.x}%`, height:`${ms.view.h}%` },
+                            { left:`${ms.view.x + ms.view.w}%`, top:`${ms.view.y}%`, width:`${100 - ms.view.x - ms.view.w}%`, height:`${ms.view.h}%` },
+                          ].map((s, i) => (
+                            <div key={i} style={{ position:"absolute", ...s, background:"rgba(11,15,19,0.72)", pointerEvents:"none", zIndex:4 }} />
+                          ))}
+                          <div
+                            onMouseDown={e => {
+                              if (ms.msMode !== "view" || ms.done) return
+                              e.stopPropagation()
+                              const p = msToPct(e); if (!p) return
+                              setMapSetup(s => s && s.view ? { ...s, msDrag: { t:"view-move", ox:s.view.x, oy:s.view.y, px:p.x, py:p.y } } : s)
+                            }}
+                            style={{ position:"absolute", left:`${ms.view.x}%`, top:`${ms.view.y}%`, width:`${ms.view.w}%`, height:`${ms.view.h}%`, border:`2px solid #22D3EE`, zIndex:5, cursor:ms.msMode === "view" && !ms.done ? "move" : "default" }}>
+                            {ms.msMode === "view" && !ms.done && ([
+                              ["nw", 0, 0, ms.view.x + ms.view.w, ms.view.y + ms.view.h, "nwse-resize"],
+                              ["ne", 100, 0, ms.view.x, ms.view.y + ms.view.h, "nesw-resize"],
+                              ["sw", 0, 100, ms.view.x + ms.view.w, ms.view.y, "nesw-resize"],
+                              ["se", 100, 100, ms.view.x, ms.view.y, "nwse-resize"],
+                            ] as [string, number, number, number, number, string][]).map(([k, cx, cy, fx, fy, cur]) => (
+                              <div key={k} onMouseDown={e => { e.stopPropagation(); setMapSetup(s => s ? { ...s, msDrag: { t:"view-corner", fx, fy } } : null) }}
+                                style={{ position:"absolute", left:`${cx}%`, top:`${cy}%`, width:28, height:28, marginLeft:-14, marginTop:-14, display:"flex", alignItems:"center", justifyContent:"center", cursor:cur }}>
+                                <div style={{ width:11, height:11, background:"#22D3EE", border:"2px solid #0B0F13", borderRadius:2 }} />
+                              </div>
+                            ))}
+                            {ms.msMode === "view" && !ms.done && ([
+                              ["l", { left:0, top:0, width:14, height:"100%", marginLeft:-7 }, "ew-resize"],
+                              ["r", { left:"100%", top:0, width:14, height:"100%", marginLeft:-7 }, "ew-resize"],
+                              ["t", { left:0, top:0, height:14, width:"100%", marginTop:-7 }, "ns-resize"],
+                              ["b", { left:0, top:"100%", height:14, width:"100%", marginTop:-7 }, "ns-resize"],
+                            ] as [string, React.CSSProperties, string][]).map(([edge, s, cur]) => (
+                              <div key={edge} onMouseDown={ev => { ev.stopPropagation(); setMapSetup(st => st ? { ...st, msDrag: { t:"view-edge", e:edge } } : null) }}
+                                style={{ position:"absolute", ...s, cursor:cur }} />
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      <MeasureLine m={ms.len} which="len" color="#22D3EE" />
+                      <MeasureLine m={ms.wid} which="wid" color="#F59E0B" />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Rail */}
+              <div style={{ width:310, background:C.panel, borderLeft:`1px solid ${C.border}`, overflowY:"auto", flexShrink:0 }}>
+
+                {/* Image controls */}
+                <div style={{ padding:"12px 14px", borderBottom:`1px solid ${C.border}` }}>
+                  <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:C.dim, marginBottom:7 }}>Image</div>
+                  {!ms.img ? (
+                    <div style={{ fontSize:11, color:C.dim }}>Upload one to begin.</div>
+                  ) : (
+                    <>
+                      <div style={{ display:"flex", gap:6, marginBottom:9 }}>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 270) % 360 } : null)} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>↺ 90°</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 90) % 360 } : null)} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>↻ 90°</button>
+                      </div>
+                      <div style={{ fontSize:9, color:C.dim, marginBottom:4 }}>SIZE · {Math.round(ms.zoom * 100)}%</div>
+                      <input type="range" min="0.5" max="2" step="0.05" value={ms.zoom} disabled={ms.done} onChange={e => setMapSetup(s => s ? { ...s, zoom: parseFloat(e.target.value) } : null)} style={{ width:"100%", marginBottom:8 }} />
+                      <div style={{ display:"flex", gap:6 }}>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, zoom: 1 } : null)} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Fit</button>
+                        <button onClick={() => { const inp = document.createElement("input"); inp.type="file"; inp.accept="image/*"; inp.onchange = (ev: Event) => { const f = (ev.target as HTMLInputElement).files?.[0]; if (f) msUpload(f) }; inp.click() }} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Replace</button>
+                      </div>
+                      <div style={{ fontSize:10, color:C.dim, marginTop:8, lineHeight:1.5 }}>
+                        Rotating and resizing never move the measurement dots relative to the image.
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {!ms.changeViewOnly && (
+                  <>
+                    <MsSection title="Length" m={ms.len} which="len" color="#22D3EE" />
+                    <MsSection title="Width" m={ms.wid} which="wid" color="#F59E0B" />
+                  </>
+                )}
+
+                {/* Scale */}
+                {bothDone && msScale && !ms.changeViewOnly && (
+                  <div style={{ padding:"12px 14px", borderBottom:`1px solid ${C.border}` }}>
+                    <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:C.dim, marginBottom:7 }}>Scale</div>
+                    <div style={{ fontFamily:MONO_F, fontSize:13, marginBottom:4 }}>{msScale.toFixed(4)} ft/px</div>
+                    <div style={{ fontFamily:MONO_F, fontSize:11, color:agree !== null && agree < 3 ? "#22C55E" : agree !== null && agree < 8 ? "#F59E0B" : "#EF4444" }}>agreement {agree?.toFixed(1)}%</div>
+                    {agree !== null && agree >= 8 && (
+                      <div style={{ fontSize:10, color:"#EF4444", marginTop:6, lineHeight:1.5 }}>Check both measurements — one is likely off, or the map is tilted rather than straight down.</div>
+                    )}
+                  </div>
+                )}
+
+                {/* View */}
+                <div style={{ padding:"12px 14px", borderBottom:`1px solid ${C.border}`, opacity:bothDone || ms.changeViewOnly ? 1 : 0.4 }}>
+                  <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:ms.view ? "#22D3EE" : C.dim, marginBottom:7 }}>Reflected view</div>
+                  {!bothDone && !ms.changeViewOnly ? (
+                    <div style={{ fontSize:11, color:C.dim }}>Measure length and width first.</div>
+                  ) : !ms.view ? (
+                    <button onClick={enterView} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"#22D3EE", color:"#06232B", border:"1px solid #22D3EE", borderRadius:6, cursor:"pointer" }}>Select area</button>
+                  ) : (
+                    <>
+                      <div style={{ fontSize:9, color:C.dim, marginBottom:3 }}>VIEW NAME</div>
+                      <input value={ms.viewName} onChange={e => setMapSetup(s => s ? { ...s, viewName: e.target.value } : null)} style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, color:"#E8EDF2", borderRadius:5, padding:"7px 9px", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", marginBottom:9, boxSizing:"border-box" }} />
+                      {areaFt && (
+                        <div style={{ fontFamily:MONO_F, fontSize:12, color:"#22D3EE", marginBottom:9 }}>{areaFt.w.toFixed(0)} ft × {areaFt.h.toFixed(0)} ft</div>
+                      )}
+                      {!ms.done && (
+                        <div style={{ fontSize:10, color:C.dim, lineHeight:1.5, marginBottom:9 }}>Drag a corner to resize, an edge to move one side, or hold inside to move the whole area.</div>
+                      )}
+                      {ms.msMode !== "view" && !ms.done && (
+                        <button onClick={enterView} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Adjust area</button>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Finalize */}
+                <div style={{ padding:14 }}>
+                  {ms.done ? (
+                    <>
+                      <div style={{ fontSize:11, color:"#22C55E", lineHeight:1.6, marginBottom:10 }}>
+                        Saved — image, rotation, both measurements, scale and the selected view.
+                      </div>
+                      {!ms.changeViewOnly && msScale && areaFt && (
+                        <div style={{ fontFamily:MONO_F, fontSize:10, color:C.dim, lineHeight:1.7, background:C.bg, border:`1px solid ${C.border}`, borderRadius:5, padding:9, marginBottom:10 }}>
+                          Site plan uploaded — {ms.len.ft} ft × {ms.wid.ft} ft measured, scale {msScale.toFixed(4)} ft/px, view {areaFt.w.toFixed(0)} × {areaFt.h.toFixed(0)} ft
+                        </div>
+                      )}
+                      <button onClick={() => { setMapSetup(null) }} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer", marginBottom:8 }}>Close</button>
+                      {ms.changeViewOnly ? null : (
+                        <button onClick={() => setMapSetup(s => s ? { ...s, done:false, msMode:"view" } : null)} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Change view</button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        disabled={ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)}
+                        onClick={() => {
+                          if (!ms.view) return
+                          if (ms.changeViewOnly) {
+                            setSiteMap(prev => prev ? { ...prev, viewName: ms.viewName, viewRect: { x: ms.view!.x/100, y: ms.view!.y/100, w: ms.view!.w/100, h: ms.view!.h/100 } } : null)
+                            setMapSetup(null)
+                          } else {
+                            if (!ms.img || !ms.len.a || !ms.len.b || !ms.wid.a || !ms.wid.b || !msScale) return
+                            setSiteMap({
+                              sourceUrl: ms.img,
+                              imageW: 620, imageH: 460,
+                              lengthPts: [ms.len.a.x/100, ms.len.a.y/100, ms.len.b.x/100, ms.len.b.y/100],
+                              widthPts: [ms.wid.a.x/100, ms.wid.a.y/100, ms.wid.b.x/100, ms.wid.b.y/100],
+                              lengthFt: parseFloat(ms.len.ft) + (parseFloat(ms.len.inches) || 0) / 12,
+                              widthFt: parseFloat(ms.wid.ft) + (parseFloat(ms.wid.inches) || 0) / 12,
+                              scale: msScale,
+                              viewName: ms.viewName,
+                              viewRect: { x: ms.view.x/100, y: ms.view.y/100, w: ms.view.w/100, h: ms.view.h/100 },
+                              uploadedAt: new Date().toLocaleDateString("en-US", { day:"numeric", month:"short", year:"numeric" }),
+                            })
+                            setMapSetup(s => s ? { ...s, done: true, msMode: null } : null)
+                          }
+                        }}
+                        style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"#22C55E", color:"#052E16", border:"1px solid #22C55E", borderRadius:6, cursor:(ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)) ? "not-allowed" : "pointer", opacity:(ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)) ? 0.32 : 1, marginBottom:8 }}>
+                        {ms.changeViewOnly ? "SAVE VIEW" : "FINALIZE MAP VIEW"}
+                      </button>
+                      {!(ms.changeViewOnly ? ms.view : (bothDone && ms.view)) && (
+                        <div style={{ fontSize:10, color:C.dim, marginTop:7, lineHeight:1.5 }}>
+                          {!ms.img ? "Upload a map image." : !ms.len.confirmed ? "Confirm the length measurement." : !ms.wid.confirmed ? "Confirm the width measurement." : "Select the area the main map will show."}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div style={{ fontSize:10, color:C.dim, marginTop:12, lineHeight:1.5 }}>
+                    Measurements lock once finalized. Assets and pipe paths are positioned against this scale.
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ── CONFIRM DIALOG ───────────────────────────────────────────────────────── */}
       {confirmDialog && (
