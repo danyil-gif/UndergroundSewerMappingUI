@@ -4,8 +4,9 @@ import { useState, useRef, useCallback, useEffect } from "react"
 
 type AssetType =
   | "catch-basin" | "storm-basin" | "sanitary-basin"
-  | "cleanout-floor" | "cleanout-stack" | "cleanout-foundation" | "cleanout-overhead"
-  | "stack-no-cleanout" | "floor-drain" | "gutter-hub" | "turf-drain"
+  | "cleanout-floor" | "cleanout-foundation" | "cleanout-overhead"
+  | "stack"
+  | "floor-drain" | "gutter-hub" | "turf-drain"
   | "ejector-pump" | "sump-pump"
 type Mode = "view" | "add-asset" | "draw-pipe" | "select-area"
 
@@ -50,6 +51,10 @@ interface Asset {
   horizontalPipeSize?: string
   // Stack
   stackSize?: string
+  stackMaterial?: string
+  hasCleanout?: "no" | "pre-existing" | "installed-by-us"
+  cleanoutSize?: string
+  cleanoutFitting?: string
   // Floor drain / Turf drain
   flowTestDone?: boolean
   flowTestResult?: boolean
@@ -200,6 +205,37 @@ interface Observation {
 interface LogisticsEntry { id: string; category: string; note: string; addedBy: string; visitId: string | null }
 interface ContactEntry { id: string; name: string; role: string; phone: string; email: string; bestContact: string; notes: string }
 
+interface AssetObservation {
+  id: string
+  assetId: string
+  visitId: string
+  observedAt: number
+  observedById: string
+  jobNumber?: string
+  depth?: string
+  conditionRating?: 1|2|3|4|5|"unable"
+  conditionBlocker?: string
+  accessSize?: string
+  accessConfig?: string
+  undergroundConn?: string
+  undergroundConnOther?: string
+  verticalPipeSize?: string
+  horizontalPipeSize?: string
+  stackSize?: string
+  stackMaterial?: string
+  hasCleanout?: "no" | "pre-existing" | "installed-by-us"
+  cleanoutSize?: string
+  cleanoutFitting?: string
+  flowTestDone?: boolean
+  flowTestResult?: boolean
+  installDate?: string
+  dischargeTestDone?: boolean
+  dischargeFunctioning?: boolean
+  cameraAccessible?: boolean
+  photos?: string[]
+  changeReason?: "work-by-us" | "work-by-others" | "correction" | "unchanged"
+}
+
 interface VisitLogEntry {
   id: string
   at: number
@@ -310,10 +346,9 @@ const ASSET_META: Record<AssetType, { label: string; abbr: string; shape: "circl
   "storm-basin":         { label: "Storm Basin",                  abbr: "SB",  shape: "diamond",  group: "basin" },
   "sanitary-basin":      { label: "Sanitary Basin",               abbr: "SAB", shape: "diamond",  group: "basin" },
   "cleanout-floor":      { label: "Clean-out — Floor",            abbr: "CF",  shape: "square",   group: "cleanout" },
-  "cleanout-stack":      { label: "Clean-out — Stack Into Floor", abbr: "CS",  shape: "square",   group: "cleanout" },
   "cleanout-foundation": { label: "Clean-out — Foundation Wall",  abbr: "CW",  shape: "square",   group: "cleanout" },
   "cleanout-overhead":   { label: "Clean-out — Overhead",         abbr: "CO",  shape: "square",   group: "cleanout" },
-  "stack-no-cleanout":   { label: "Stack — No Clean-out",         abbr: "SK",  shape: "triangle", group: "stack" },
+  "stack":               { label: "Stack",                         abbr: "STK", shape: "triangle", group: "stack" },
   "floor-drain":         { label: "Floor Drain",                  abbr: "FD",  shape: "circle",   group: "drain" },
   "gutter-hub":          { label: "Gutter Hub",                   abbr: "GH",  shape: "hexagon",  group: "drain" },
   "turf-drain":          { label: "Turf Drain",                   abbr: "TD",  shape: "circle",   group: "drain" },
@@ -323,8 +358,8 @@ const ASSET_META: Record<AssetType, { label: string; abbr: string; shape: "circl
 
 const ASSET_PREFIX: Record<AssetType, string> = {
   "catch-basin": "CB", "storm-basin": "SB", "sanitary-basin": "SAB",
-  "cleanout-floor": "CF", "cleanout-stack": "CS", "cleanout-foundation": "CW", "cleanout-overhead": "CO",
-  "stack-no-cleanout": "SK", "floor-drain": "FD", "gutter-hub": "GH", "turf-drain": "TD",
+  "cleanout-floor": "CF", "cleanout-foundation": "CW", "cleanout-overhead": "CO",
+  "stack": "STK", "floor-drain": "FD", "gutter-hub": "GH", "turf-drain": "TD",
   "ejector-pump": "EP", "sump-pump": "SP",
 }
 
@@ -362,9 +397,45 @@ const CONN_OPTIONS = ["Tee","Wye","Sanitary Tee","90°","Unknown","Other"]
 const SAMPLE_ASSETS: Asset[] = [
   { id: "a1", type: "sanitary-basin",  label: "SAB-001", x: 20, y: 26 },
   { id: "a2", type: "catch-basin",     label: "CB-001",  x: 57, y: 20 },
-  { id: "a3", type: "cleanout-floor",  label: "CF-001",  x: 74, y: 63 },
+  { id: "a3", type: "cleanout-floor",  label: "CF-001",  x: 74, y: 63, accessSize: '4"', accessConfig: "One-Way", undergroundConn: "Wye", cameraAccessible: true, conditionRating: 3 },
   { id: "a4", type: "floor-drain",     label: "FD-001",  x: 30, y: 70 },
   { id: "a5", type: "ejector-pump",    label: "EP-001",  x: 54, y: 46 },
+  { id: "a6", type: "stack",           label: "STK-001", x: 40, y: 55, hasCleanout: "installed-by-us", stackSize: '4"', stackMaterial: "Cast Iron", cleanoutSize: '4"', cleanoutFitting: "Wye" },
+  { id: "a7", type: "stack",           label: "STK-002", x: 65, y: 38, hasCleanout: "no", stackSize: '3"', stackMaterial: "Cast Iron" },
+]
+
+// Two sample observations per asset for a3 (cleanout-floor: 3"→4", not-accessible→accessible)
+// and a2 (catch-basin: with two photos in slot 0)
+const SAMPLE_OBSERVATIONS: AssetObservation[] = [
+  // a3 · CF-001 — first visit (Master Plan, Dino, job #48770, 14 Mar)
+  {
+    id: "obs-a3-1", assetId: "a3", visitId: "sv1", observedAt: new Date("2024-03-14").getTime(),
+    observedById: "p-dino", jobNumber: "#48770",
+    accessSize: '3"', accessConfig: "One-Way", undergroundConn: "Wye",
+    cameraAccessible: false, conditionRating: 3,
+  },
+  // a3 · CF-001 — second visit (Emergency Call, Nicholas, job #48812, 12 Jun)
+  {
+    id: "obs-a3-2", assetId: "a3", visitId: "sv2", observedAt: new Date("2024-06-12").getTime(),
+    observedById: "p-nicholas", jobNumber: "#48812",
+    accessSize: '4"', cameraAccessible: true,
+    changeReason: "work-by-others",
+  },
+  // a2 · CB-001 — first visit (Master Plan, Dino, job #48770, 14 Mar) — with a photo
+  {
+    id: "obs-a2-1", assetId: "a2", visitId: "sv1", observedAt: new Date("2024-03-14").getTime(),
+    observedById: "p-dino", jobNumber: "#48770",
+    conditionRating: 2, depth: "4.5",
+    photos: ["data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgZmlsbD0iIzMzNDQ1NSIvPjx0ZXh0IHg9IjEwMCIgeT0iODAiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM2Njc3ODgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNhbWVyYSBwaG90bywgMTQgTWFyPC90ZXh0Pjwvc3ZnPg=="],
+  },
+  // a2 · CB-001 — second visit (Office Update, Dino, no job, 22 Feb 2025)
+  {
+    id: "obs-a2-2", assetId: "a2", visitId: "sv3", observedAt: new Date("2025-02-22").getTime(),
+    observedById: "p-dino", jobNumber: undefined,
+    conditionRating: 3,
+    photos: ["data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgZmlsbD0iIzQ0NTU2NiIvPjx0ZXh0IHg9IjEwMCIgeT0iODAiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM3Nzg4OTkiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkZvbGxvdy11cCBwaG90bywgMjIgRmViPC90ZXh0Pjwvc3ZnPg=="],
+    changeReason: "correction",
+  },
 ]
 
 const SAMPLE_PIPES: Pipe[] = [
@@ -511,7 +582,7 @@ const STEP_TITLES = ["", "Set up", "Push", "Why the camera stopped", "Upload the
 
 // ── Asset icons ────────────────────────────────────────────────────────────────
 
-function AssetIcon({ type, sel, c, size = 28 }: { type: AssetType; sel: boolean; c: string; size?: number }) {
+function AssetIcon({ type, sel, c, size = 28, hasCleanout }: { type: AssetType; sel: boolean; c: string; size?: number; hasCleanout?: string }) {
   const meta = ASSET_META[type]
   const abbr = meta.abbr
   const fill = sel ? c : "#E2EDF5"
@@ -519,6 +590,22 @@ function AssetIcon({ type, sel, c, size = 28 }: { type: AssetType; sel: boolean;
   const fs = abbr.length > 2 ? 6.5 : 7.5
   const S = size
   const h = S
+  // Stack: two glyph states based on hasCleanout
+  if (type === "stack") {
+    const hasAccess = hasCleanout === "pre-existing" || hasCleanout === "installed-by-us"
+    return (
+      <svg width={S} height={h} viewBox={`0 0 ${S} ${h}`}>
+        {/* tab above */}
+        <rect x={S/2-3} y={0} width={6} height={5} rx="1" fill={fill} stroke={c} strokeWidth="1.2" />
+        {/* main circle — dashed if no cleanout */}
+        <circle cx={S/2} cy={h*0.62} r={S*0.35} fill={fill} stroke={c} strokeWidth="1.5"
+          strokeDasharray={hasAccess ? "none" : "3 2"} />
+        {/* plug square only when has cleanout */}
+        {hasAccess && <rect x={S/2-3} y={h*0.62-3} width={6} height={6} rx="1" fill={c} />}
+        <text x={S/2} y={h*0.68+fs*0.38} textAnchor="middle" fill={hasAccess ? (sel ? "#fff" : C.bg) : text} fontSize={fs-1} fontFamily="JetBrains Mono" fontWeight="700">{abbr}</text>
+      </svg>
+    )
+  }
   if (meta.shape === "circle") return (
     <svg width={S} height={h} viewBox={`0 0 ${S} ${h}`}>
       <circle cx={S/2} cy={h/2} r={S/2-1.5} fill={fill} stroke={c} strokeWidth="1.5" />
@@ -555,27 +642,49 @@ function AssetIcon({ type, sel, c, size = 28 }: { type: AssetType; sel: boolean;
   )
 }
 
-function AssetNode({ asset, selected, drawActive, scale, onClick, onMouseDown, onTouchStart, dimmed }: {
-  asset: Asset; selected: boolean; drawActive: boolean; scale: number; dimmed?: boolean
-  onClick: (e: React.MouseEvent) => void; onMouseDown: (e: React.MouseEvent) => void; onTouchStart?: (e: React.TouchEvent) => void
+function AssetNode({ asset, selected, drawState, scale, onClick, onMouseDown, onTouchStart, onMouseEnter, onMouseLeave, dimmed }: {
+  asset: Asset; selected: boolean
+  drawState?: "start" | "snapped" | "target" | null
+  scale: number; dimmed?: boolean
+  onClick: (e: React.MouseEvent) => void; onMouseDown: (e: React.MouseEvent) => void
+  onTouchStart?: (e: React.TouchEvent) => void
+  onMouseEnter?: () => void; onMouseLeave?: () => void
 }) {
-  const c = drawActive ? "#F59E0B" : "#1a1a1a"
+  const AMBER = "#F59E0B"
+  const c = drawState === "start" || drawState === "snapped" ? AMBER : "#1a1a1a"
   return (
     <div
       style={{
         position: "absolute", left: `${asset.x}%`, top: `${asset.y}%`,
         transform: `translate(-50%, -50%) scale(${scale})`,
         transformOrigin: "center center",
-        cursor: "pointer", zIndex: 10,
+        cursor: drawState === "target" ? "crosshair" : "pointer", zIndex: 10,
         filter: selected ? `drop-shadow(0 0 6px ${c}88)` : dimmed ? "grayscale(0.6)" : undefined,
-        opacity: dimmed ? 0.25 : 1,
+        opacity: dimmed ? 0.25 : drawState === "snapped" ? 0.65 : 1,
         transition: "filter 0.2s, transform 0.15s, opacity 0.2s",
       }}
       onClick={e => { e.stopPropagation(); onClick(e) }}
       onMouseDown={onMouseDown}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
       onTouchStart={e => { e.stopPropagation(); onTouchStart?.(e) }}
     >
-      <AssetIcon type={asset.type} sel={selected} c={c} size={28} />
+      {drawState === "target" && (
+        <div style={{
+          position: "absolute", top: "50%", left: "50%",
+          transform: "translate(-50%, -50%)",
+          width: 40 * scale, height: 40 * scale, borderRadius: "50%",
+          border: `2px solid ${AMBER}`, pointerEvents: "none",
+        }} />
+      )}
+      {drawState === "snapped" && (
+        <div style={{
+          position: "absolute", top: -2, right: -2,
+          width: 7, height: 7, borderRadius: "50%",
+          background: AMBER, pointerEvents: "none",
+        }} />
+      )}
+      <AssetIcon type={asset.type} sel={selected} c={c} size={28} hasCleanout={asset.hasCleanout} />
       <div style={{
         position: "absolute", top: "100%", left: "50%", transform: "translateX(-50%)",
         marginTop: 3, fontSize: 9, fontFamily: "JetBrains Mono",
@@ -1144,11 +1253,85 @@ function InputField({ label, value, onChange, placeholder, type }: {
   )
 }
 
+// ── Observation projection ────────────────────────────────────────────────────
+
+const OBS_VERSIONED_KEYS: (keyof AssetObservation)[] = [
+  "depth","conditionRating","conditionBlocker",
+  "accessSize","accessConfig","undergroundConn","undergroundConnOther",
+  "verticalPipeSize","horizontalPipeSize",
+  "stackSize","stackMaterial","hasCleanout","cleanoutSize","cleanoutFitting",
+  "flowTestDone","flowTestResult","installDate","dischargeTestDone","dischargeFunctioning",
+  "cameraAccessible","photos",
+]
+
+function projectAsset(asset: Asset, obs: AssetObservation[]): Asset {
+  const mine = obs.filter(o => o.assetId === asset.id).sort((a, b) => b.observedAt - a.observedAt)
+  if (mine.length === 0) return asset
+  const patch: Partial<Asset> = {}
+  for (const key of OBS_VERSIONED_KEYS) {
+    for (const o of mine) {
+      const v = o[key as keyof AssetObservation]
+      if (v !== undefined && v !== null) {
+        ;(patch as Record<string, unknown>)[key] = v
+        break
+      }
+    }
+  }
+  return { ...asset, ...patch }
+}
+
+function obsFieldCount(obs: AssetObservation): number {
+  return OBS_VERSIONED_KEYS.filter(k => obs[k as keyof AssetObservation] !== undefined).length
+}
+
+function obsFieldNames(obs: AssetObservation): string {
+  const names: string[] = []
+  const map: Partial<Record<keyof AssetObservation, string>> = {
+    depth: "depth", conditionRating: "condition", accessSize: "access size",
+    accessConfig: "access config", undergroundConn: "underground conn",
+    verticalPipeSize: "vertical pipe size", horizontalPipeSize: "horizontal pipe size",
+    stackSize: "stack size", stackMaterial: "stack material", hasCleanout: "clean-out",
+    cleanoutSize: "cleanout size", cleanoutFitting: "fitting",
+    flowTestDone: "flow test", installDate: "install date",
+    dischargeTestDone: "discharge test", cameraAccessible: "camera accessible",
+    photos: "photos",
+  }
+  for (const k of OBS_VERSIONED_KEYS) {
+    if (obs[k as keyof AssetObservation] !== undefined && map[k as keyof AssetObservation]) {
+      names.push(map[k as keyof AssetObservation]!)
+    }
+  }
+  return names.join(", ")
+}
+
+// Dimension/config fields that trigger the "something changed" dialog
+const WORK_FIELDS: (keyof AssetObservation)[] = [
+  "accessSize","accessConfig","undergroundConn","verticalPipeSize","horizontalPipeSize",
+  "stackSize","stackMaterial","hasCleanout","cleanoutSize","cleanoutFitting",
+  "installDate","cameraAccessible",
+]
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [assets, setAssets] = useState<Asset[]>(SAMPLE_ASSETS)
   const [pipes, setPipes] = useState<Pipe[]>(SAMPLE_PIPES)
+  const [assetObservations, setAssetObservations] = useState<AssetObservation[]>(SAMPLE_OBSERVATIONS)
+  // Observation UI state
+  const [obsMode, setObsMode] = useState<"view" | "new-obs" | null>(null) // null = edit form (no obs yet)
+  const [obsDraft, setObsDraft] = useState<Partial<AssetObservation>>({})
+  const [obsHistoryOpen, setObsHistoryOpen] = useState(false)
+  const [obsFieldHistoryField, setObsFieldHistoryField] = useState<keyof AssetObservation | null>(null)
+  const [obsViewingId, setObsViewingId] = useState<string | null>(null) // viewing a past obs detail
+  const [obsChangeDialog, setObsChangeDialog] = useState<{
+    changes: { field: keyof AssetObservation; from: unknown; to: unknown }[]
+    depthOnly: boolean
+    onResolve: (reason: AssetObservation["changeReason"]) => void
+  } | null>(null)
+  const [obsPhotoSlot, setObsPhotoSlot] = useState<{
+    assetId: string; slotIdx: number
+    photos: { src: string; obsId: string; observedAt: number; observedById: string }[]
+  } | null>(null) // photo history viewer for a slot
   const [mapImage, setMapImage] = useState<string | null>(null)
   const [mapImageProps, setMapImageProps] = useState({ x: 10, y: 10, w: 60, h: 60, rotation: 0, opacity: 0.85 })
   const [showMapMenu, setShowMapMenu] = useState(false)
@@ -1163,6 +1346,7 @@ export default function App() {
   const [drawFrom, setDrawFrom] = useState<string | null>(null)        // assetId start
   const [drawFromCoord, setDrawFromCoord] = useState<{ x: number; y: number; pipeId: string } | null>(null) // pipe-snap start
   const [drawPoints, setDrawPoints] = useState<RoutePoint[]>([])
+  const [hoverAssetId, setHoverAssetId] = useState<string | null>(null)
   const [drawMouse, setDrawMouse] = useState<{ x: number; y: number } | null>(null)
   const [drawHoverPtIdx, setDrawHoverPtIdx] = useState<number | null>(null) // index of drawPoint being hovered for removal
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null)
@@ -1430,7 +1614,8 @@ export default function App() {
     })
   }
 
-  const selectedAsset = assets.find(a => a.id === selectedAssetId)
+  const selectedAssetRaw = assets.find(a => a.id === selectedAssetId)
+  const selectedAsset = selectedAssetRaw ? projectAsset(selectedAssetRaw, assetObservations) : undefined
   const selectedPipe = pipes.find(p => p.id === selectedPipeId)
   const selectedVideo = assetVideoSource
   ? assets.find(a => a.id === assetVideoSource.assetId)?.videos?.find(v => v.id === assetVideoSource.videoId)
@@ -1502,6 +1687,7 @@ export default function App() {
     setDrawPoints([])
     setDrawMouse(null)
     setDrawHoverPtIdx(null)
+    setHoverAssetId(null)
     setMode("view")
     setSelectedPipeId(newPipe.id)
     setSelectedAssetId(null)
@@ -1830,6 +2016,8 @@ export default function App() {
   const selectAsset = (id: string) => {
     setSelectedAssetId(id); setSelectedPipeId(null); setSelectedVideoId(null)
     setEditingPipe(false); setMode("view"); setRightPanelOpen(true)
+    // Reset observation UI when switching assets
+    setObsMode(null); setObsDraft({}); setObsHistoryOpen(false); setObsFieldHistoryField(null); setObsViewingId(null)
   }
 
   // ── Archive / delete helpers ────────────────────────────────────────────────
@@ -2611,9 +2799,13 @@ export default function App() {
             const needsDepth = ["catch-basin","storm-basin","sanitary-basin"].includes(a.type)
             if (needsDepth && !a.depth) outstanding.push({ id: a.id, label: a.label, issue: "depth not set", blocking: true })
             const isCleanout = a.type.startsWith("cleanout")
-            const isStack = a.type === "stack-no-cleanout"
+            const isStack = a.type === "stack"
             if (isCleanout && !a.accessSize) outstanding.push({ id: a.id, label: a.label, issue: "access size not set", blocking: true })
             if (isStack && !a.stackSize) outstanding.push({ id: a.id, label: a.label, issue: "stack size not set", blocking: true })
+            // Stacks with no cleanout are not gaps — they are correctly recorded state
+            if (isStack && a.hasCleanout === "no") {
+              // Skip docs gap; surface as recommendation instead
+            }
             const photoCount = (a.photos ?? []).filter(Boolean).length
             if (photoCount === 0) outstanding.push({ id: a.id, label: a.label, issue: "no photos", blocking: false })
           })
@@ -2885,6 +3077,12 @@ export default function App() {
               {assets.filter(a => !a.archived).map(asset => {
                 const cnt = pipes.filter(p => p.fromId === asset.id || p.toId === asset.id).length
                 const sel = selectedAssetId === asset.id
+                const latestObs = assetObservations
+                  .filter(o => o.assetId === asset.id)
+                  .sort((a2, b) => b.observedAt - a2.observedAt)[0]
+                const twelveMonthsAgo = Date.now() - 365 * 24 * 3600 * 1000
+                const isStale = latestObs && latestObs.observedAt < twelveMonthsAgo
+                const staleMonths = latestObs ? Math.floor((Date.now() - latestObs.observedAt) / (30 * 24 * 3600 * 1000)) : null
                 return (
                   <div
                     key={asset.id}
@@ -2902,8 +3100,11 @@ export default function App() {
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: sel ? C.cyan : C.text, fontFamily: "JetBrains Mono" }}>{asset.label}</div>
-                      <div style={{ fontSize: 10, color: C.muted }}>{asset.type} · {cnt} pipe{cnt !== 1 ? "s" : ""}</div>
+                      <div style={{ fontSize: 10, color: C.muted }}>{ASSET_META[asset.type].label} · {cnt} pipe{cnt !== 1 ? "s" : ""}</div>
                     </div>
+                    {isStale && (
+                      <div title="Not observed in over a year." style={{ fontSize: 9.5, color: "#A96B00", flexShrink: 0 }}>⚠ {staleMonths}mo</div>
+                    )}
                   </div>
                 )
               })}
@@ -3154,8 +3355,19 @@ export default function App() {
               {!editingMap && mode === "view" && "VIEW — select asset or pipe"}
               {mode === "add-asset" && `PLACE — click to add ${addAssetType}`}
               {mode === "draw-pipe" && !(drawFrom || drawFromCoord) && "DRAW — click an asset or existing pipe to start the route"}
-              {mode === "draw-pipe" && (drawFrom || drawFromCoord) && !drawPoints.length && `DRAW — click map to add points  ·  click asset to snap  ·  double-click or Complete to finish`}
-              {mode === "draw-pipe" && (drawFrom || drawFromCoord) && drawPoints.length > 0 && `DRAW — ${drawPoints.length} pt${drawPoints.length > 1 ? "s" : ""}  ·  hover point to remove  ·  double-click to finish`}
+              {mode === "draw-pipe" && (drawFrom || drawFromCoord) && (() => {
+                const snapTo = hoverAssetId && hoverAssetId !== drawFrom
+                  ? assets.find(a => a.id === hoverAssetId)?.label
+                  : null
+                const pts = drawPoints.length
+                const base = pts > 0 ? `DRAW — ${pts} pt${pts > 1 ? "s" : ""}` : "DRAW — click map to add points"
+                const tail = snapTo
+                  ? ` · snap to ${snapTo}`
+                  : pts > 0
+                    ? "  ·  hover point to remove  ·  double-click to finish"
+                    : "  ·  click asset to snap  ·  double-click or Complete to finish"
+                return base + tail
+              })()}
               {mode === "select-area" && "FRAME — drag to define a map view area"}
             </span>
           </div>
@@ -3169,7 +3381,7 @@ export default function App() {
                   ✓ Complete Pipe
                 </button>
               )}
-              <button onClick={() => { setMode("view"); setDrawFrom(null); setDrawFromCoord(null); setDrawPoints([]); setDrawMouse(null); setDrawHoverPtIdx(null); setSelectStart(null); setSelectCurrent(null) }} style={{ padding: "3px 9px", fontSize: 9.5, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "JetBrains Mono", letterSpacing: "0.05em" }}>
+              <button onClick={() => { setMode("view"); setDrawFrom(null); setDrawFromCoord(null); setDrawPoints([]); setDrawMouse(null); setDrawHoverPtIdx(null); setHoverAssetId(null); setSelectStart(null); setSelectCurrent(null) }} style={{ padding: "3px 9px", fontSize: 9.5, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "JetBrains Mono", letterSpacing: "0.05em" }}>
                 ESC / CANCEL
               </button>
             </div>
@@ -3862,7 +4074,6 @@ export default function App() {
                 key={asset.id}
                 asset={asset}
                 selected={selectedAssetId === asset.id}
-                drawActive={drawFrom === asset.id}
                 scale={iconScaleByType[asset.type] ?? 1}
                 onClick={_e => handleAssetClick(asset.id)}
                 onMouseDown={e => handleAssetMouseDown(e, asset.id)}
@@ -3872,6 +4083,14 @@ export default function App() {
                   const { clientX, clientY } = getTouchXY(e)
                   handleAssetMouseDown({ clientX, clientY, stopPropagation: () => {} } as React.MouseEvent, asset.id)
                 }}
+                onMouseEnter={() => setHoverAssetId(asset.id)}
+                onMouseLeave={() => setHoverAssetId(prev => prev === asset.id ? null : prev)}
+                drawState={
+                  drawFrom === asset.id ? "start"
+                  : drawPoints.some(p => p.assetId === asset.id) ? "snapped"
+                  : (mode === "draw-pipe" && (drawFrom || drawFromCoord) && hoverAssetId === asset.id) ? "target"
+                  : null
+                }
                 dimmed={assetOutOfView}
               />
             )
@@ -4168,13 +4387,503 @@ export default function App() {
               )}
             </Section>
 
-            {/* ── Photos (all types) ───────────────────────────────────────── */}
+            {/* ── Observation system ───────────────────────────────────────── */}
             {(() => {
               const a = selectedAsset
+              const myObs = assetObservations
+                .filter(o => o.assetId === a.id)
+                .sort((x, y) => y.observedAt - x.observedAt)
+              const hasObs = myObs.length > 0
+              const currentVisit = visits.find(v => v.id === currentVisitId) ?? null
+
+              // Helper: format date
+              const fmtDate = (ts: number) => new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+              const fmtVisitRef = (obs: AssetObservation) => {
+                const v = visits.find(x => x.id === obs.visitId)
+                return v ? `${v.visitType} · ${fmtDate(obs.observedAt)}` : fmtDate(obs.observedAt)
+              }
+
+              // Latest value + its source obs for each field
+              type FieldSource = { value: unknown; obs: AssetObservation }
+              const latestByField: Partial<Record<keyof AssetObservation, FieldSource>> = {}
+              for (const key of OBS_VERSIONED_KEYS) {
+                for (const o of myObs) {
+                  const v = o[key as keyof AssetObservation]
+                  if (v !== undefined && v !== null) {
+                    latestByField[key as keyof AssetObservation] = { value: v, obs: o }
+                    break
+                  }
+                }
+              }
+
+              // Field label display helper
+              function fmtFieldValue(k: keyof AssetObservation, v: unknown): string {
+                if (v === undefined || v === null) return "—"
+                if (typeof v === "boolean") return v ? "Yes" : "No"
+                if (k === "conditionRating") return typeof v === "number" ? CONDITION_LABELS[v] : String(v)
+                if (k === "photos") return Array.isArray(v) ? String((v as string[]).filter(Boolean).length) : "0"
+                return String(v)
+              }
+
+              // Which fields to show for this asset type
+              function relevantFields(type: AssetType): (keyof AssetObservation)[] {
+                const isBasin = ["catch-basin","storm-basin","sanitary-basin"].includes(type)
+                const isCleanout = type.startsWith("cleanout")
+                const isStack = type === "stack"
+                const isDrain = ["floor-drain","turf-drain"].includes(type)
+                const isPump = ["ejector-pump","sump-pump"].includes(type)
+                const isGutter = type === "gutter-hub"
+                const fields: (keyof AssetObservation)[] = ["conditionRating"]
+                if (isBasin) fields.push("depth")
+                if (isCleanout) fields.push("accessSize","accessConfig","undergroundConn","cameraAccessible")
+                if (type === "cleanout-overhead") fields.push("verticalPipeSize","horizontalPipeSize")
+                if (isStack) fields.push("stackSize","stackMaterial","hasCleanout","cleanoutSize","cleanoutFitting","cameraAccessible")
+                if (isDrain) fields.push("flowTestDone","flowTestResult")
+                if (isPump) fields.push("installDate","dischargeTestDone","dischargeFunctioning")
+                if (isGutter) fields.push("cameraAccessible")
+                fields.push("photos")
+                return fields
+              }
+
+              const FIELD_LABELS: Partial<Record<keyof AssetObservation, string>> = {
+                conditionRating: "Condition", depth: "Depth",
+                accessSize: "Access size", accessConfig: "Access config",
+                undergroundConn: "Underground conn", cameraAccessible: "Camera accessible",
+                verticalPipeSize: "Vertical pipe size", horizontalPipeSize: "Horizontal pipe size",
+                stackSize: "Stack size", stackMaterial: "Stack material",
+                hasCleanout: "Has clean-out", cleanoutSize: "Clean-out size", cleanoutFitting: "Fitting",
+                flowTestDone: "Flow test", flowTestResult: "Flow result",
+                installDate: "Install date", dischargeTestDone: "Discharge test", dischargeFunctioning: "Functioning",
+                photos: "Photos",
+              }
+
+              // Helper: save observation
+              function saveObservation(patch: Partial<AssetObservation>, reason: AssetObservation["changeReason"]) {
+                const visitId = currentVisitId ?? "sv1"
+                const person = currentVisit?.personId ?? "p-dino"
+                const obs: AssetObservation = {
+                  id: `obs-${Date.now()}`,
+                  assetId: a.id,
+                  visitId,
+                  observedAt: Date.now(),
+                  observedById: person,
+                  jobNumber: currentVisit?.jobId ? SAMPLE_JOBS.find(j => j.id === currentVisit.jobId)?.number : undefined,
+                  ...patch,
+                  changeReason: reason,
+                }
+                setAssetObservations(prev => [...prev, obs])
+                // Project into asset
+                const projected = projectAsset(a, [...assetObservations, obs])
+                setAssets(prev => prev.map(x => x.id === a.id ? { ...x, ...projected } : x))
+                setObsMode("view")
+                setObsDraft({})
+              }
+
+              function doConfirmAll() {
+                const all: Partial<AssetObservation> = {}
+                for (const k of OBS_VERSIONED_KEYS) {
+                  const s = latestByField[k as keyof AssetObservation]
+                  if (s) (all as Record<string, unknown>)[k] = s.value
+                }
+                const n = Object.keys(all).length
+                saveObservation(all, "unchanged")
+                appendLog(`${a.label} verified — ${n} field${n !== 1 ? "s" : ""} unchanged`)
+              }
+
+              function doSaveObs() {
+                // Find diffs from projection
+                const patch: Partial<AssetObservation> = {}
+                for (const k of OBS_VERSIONED_KEYS) {
+                  const draftVal = (obsDraft as Record<string, unknown>)[k]
+                  if (draftVal !== undefined) {
+                    const latestVal = latestByField[k as keyof AssetObservation]?.value
+                    if (draftVal !== latestVal) {
+                      (patch as Record<string, unknown>)[k] = draftVal
+                    }
+                  }
+                }
+                // Check if any WORK_FIELDS changed
+                const workChanges = WORK_FIELDS
+                  .filter(k => patch[k as keyof AssetObservation] !== undefined)
+                  .map(k => ({
+                    field: k as keyof AssetObservation,
+                    from: latestByField[k as keyof AssetObservation]?.value,
+                    to: patch[k as keyof AssetObservation],
+                  }))
+                const depthChanged = patch.depth !== undefined
+                if (workChanges.length > 0) {
+                  setObsChangeDialog({
+                    changes: workChanges,
+                    depthOnly: workChanges.length === 0 && depthChanged,
+                    onResolve: (reason) => {
+                      saveObservation(patch, reason)
+                      const desc = workChanges.map(c => `${FIELD_LABELS[c.field] ?? c.field} ${c.from} → ${c.to}`).join(" · ")
+                      if (reason === "correction") appendLog(`${a.label} corrected — ${desc}`)
+                      else appendLog(`${a.label} updated — ${desc} · ${reason === "work-by-us" ? "work performed by us" : "work by another party"}`)
+                      setObsChangeDialog(null)
+                    },
+                  })
+                } else if (depthChanged) {
+                  setObsChangeDialog({
+                    changes: [{ field: "depth", from: latestByField.depth?.value, to: patch.depth }],
+                    depthOnly: true,
+                    onResolve: (reason) => {
+                      saveObservation(patch, reason)
+                      appendLog(`${a.label} corrected — depth ${latestByField.depth?.value} → ${patch.depth}`)
+                      setObsChangeDialog(null)
+                    },
+                  })
+                } else {
+                  const desc = Object.keys(patch).map(k => `${FIELD_LABELS[k as keyof AssetObservation] ?? k}`).join(", ")
+                  saveObservation(patch, "unchanged")
+                  appendLog(`${a.label} updated — ${desc}`)
+                }
+              }
+
+              const nothingChanged = OBS_VERSIONED_KEYS.every(k => {
+                const d = (obsDraft as Record<string, unknown>)[k]
+                if (d === undefined) return true
+                return d === latestByField[k as keyof AssetObservation]?.value
+              })
+
+              // ── Latest state view ─────────────────────────────────────────
+              if (hasObs && obsMode !== "new-obs") {
+                const firstObs = myObs[myObs.length - 1]
+                const lastObs = myObs[0]
+                const createdPerson = SITE_PERSONS.find(p => p.id === firstObs.observedById)
+                const fields = relevantFields(a.type)
+                return (
+                  <>
+                    {/* Provenance */}
+                    <Section>
+                      <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.6 }}>
+                        Added by {createdPerson?.name ?? "—"} · {fmtVisitRef(firstObs)}
+                      </div>
+                    </Section>
+
+                    {/* Latest state */}
+                    <Section>
+                      <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>LATEST STATE</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                        {fields.map(fk => {
+                          const src = latestByField[fk]
+                          const displayVal = src ? fmtFieldValue(fk, src.value) : "—"
+                          const ref = src ? fmtVisitRef(src.obs) : "not recorded"
+                          return (
+                            <div key={String(fk)} onClick={() => setObsFieldHistoryField(fk as keyof AssetObservation)}
+                              style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "5px 8px", borderRadius: 4, cursor: "pointer", transition: "background 0.1s" }}
+                              onMouseEnter={e => (e.currentTarget.style.background = C.card)}
+                              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                            >
+                              <span style={{ fontSize: 10.5, color: C.muted, flex: "0 0 120px" }}>{FIELD_LABELS[fk] ?? String(fk)}</span>
+                              <span style={{ fontSize: 11, fontFamily: "JetBrains Mono", color: src ? C.text : C.dim, fontWeight: src ? 600 : 400 }}>{displayVal}</span>
+                              <span style={{ fontSize: 9.5, color: C.dim, marginLeft: "auto", flexShrink: 0 }}>{ref}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </Section>
+
+                    {/* + New Observation button */}
+                    <div style={{ padding: "0 16px 8px" }}>
+                      <button
+                        onClick={() => { setObsMode("new-obs"); setObsDraft({}) }}
+                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", letterSpacing: "0.04em" }}
+                      >+ NEW OBSERVATION</button>
+                    </div>
+
+                    {/* Observation history */}
+                    <Section>
+                      <button
+                        onClick={() => setObsHistoryOpen(o => !o)}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                      >
+                        <span style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase" }}>OBSERVATION HISTORY · {myObs.length}</span>
+                        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" style={{ transform: obsHistoryOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.15s" }}>
+                          <path d="M2 4l4 4 4-4" stroke={C.muted} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
+                      {obsHistoryOpen && (
+                        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                          {myObs.map(obs => {
+                            const person = SITE_PERSONS.find(p => p.id === obs.observedById)
+                            const v = visits.find(x => x.id === obs.visitId)
+                            const fieldSummary = obsFieldNames(obs)
+                            const cnt = obsFieldCount(obs)
+                            return (
+                              <div key={obs.id}
+                                onClick={() => setObsViewingId(obs.id === obsViewingId ? null : obs.id)}
+                                style={{ padding: "9px 12px", borderRadius: 6, background: obsViewingId === obs.id ? "#E0F0FA" : C.card, border: `1px solid ${obsViewingId === obs.id ? C.cyan : C.border}`, cursor: "pointer" }}
+                              >
+                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  <span style={{ fontSize: 10.5, fontFamily: "JetBrains Mono", color: C.muted, flexShrink: 0 }}>{fmtDate(obs.observedAt)}</span>
+                                  <span style={{ fontSize: 10.5, color: C.text, fontWeight: 500 }}>{v?.visitType ?? "—"}</span>
+                                  <span style={{ fontSize: 10.5, color: C.muted }}>{person?.name ?? "—"}</span>
+                                  <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto", fontFamily: "JetBrains Mono" }}>{obs.jobNumber ?? "—"}</span>
+                                </div>
+                                <div style={{ fontSize: 10, color: C.dim, marginTop: 3 }}>
+                                  {cnt > 0 ? (cnt === 1 ? fieldSummary : `${cnt} fields recorded`) : "No fields"}
+                                </div>
+                                {obsViewingId === obs.id && (
+                                  <div style={{ marginTop: 8, borderTop: `1px solid ${C.border}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                                    {OBS_VERSIONED_KEYS.filter(k => obs[k as keyof AssetObservation] !== undefined).map(k => (
+                                      <div key={String(k)} style={{ display: "flex", gap: 8, fontSize: 10 }}>
+                                        <span style={{ color: C.muted, flex: "0 0 110px" }}>{FIELD_LABELS[k as keyof AssetObservation] ?? String(k)}</span>
+                                        <span style={{ fontFamily: "JetBrains Mono", color: C.text }}>{fmtFieldValue(k as keyof AssetObservation, obs[k as keyof AssetObservation])}</span>
+                                      </div>
+                                    ))}
+                                    {obs.changeReason && obs.changeReason !== "unchanged" && (
+                                      <div style={{ marginTop: 4, fontSize: 10, color: obs.changeReason === "work-by-us" ? "#00803E" : obs.changeReason === "work-by-others" ? C.blue : C.muted, fontWeight: 600 }}>
+                                        {obs.changeReason === "work-by-us" ? "Work performed by us" : obs.changeReason === "work-by-others" ? "Work by another party" : "Earlier reading corrected"}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </Section>
+                  </>
+                )
+              }
+
+              // ── New Observation form ──────────────────────────────────────
+              if (hasObs && obsMode === "new-obs") {
+                const fields = relevantFields(a.type)
+                const visitLabel = currentVisit
+                  ? `${currentVisit.visitType} · ${new Date(currentVisit.startedAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })} · ${SITE_PERSONS.find(p => p.id === currentVisit.personId)?.name ?? "—"}${currentVisit.jobId ? " · job " + (SAMPLE_JOBS.find(j => j.id === currentVisit.jobId)?.number ?? "") : ""}`
+                  : "No active visit — observation will be stamped to the last visit"
+
+                return (
+                  <Section>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: C.cyan, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>NEW OBSERVATION · {a.label}</div>
+                    <div style={{ fontSize: 10, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>{visitLabel}</div>
+
+                    {/* Confirm all */}
+                    <button
+                      onClick={doConfirmAll}
+                      style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, background: "#00803E", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", marginBottom: 14, letterSpacing: "0.03em" }}
+                    >NOTHING CHANGED — CONFIRM ALL {Object.keys(latestByField).length} FIELDS</button>
+
+                    <div style={{ fontSize: 9.5, color: C.dim, marginBottom: 10, textAlign: "center" }}>— or update what's different —</div>
+
+                    {/* Field rows */}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+                      {fields.filter(fk => fk !== "photos").map(fk => {
+                        const src = latestByField[fk]
+                        const currentDraftVal = (obsDraft as Record<string, unknown>)[fk]
+                        const displayVal = currentDraftVal !== undefined ? currentDraftVal : src?.value
+                        const ref = src ? fmtVisitRef(src.obs) : "not recorded"
+                        const changed = currentDraftVal !== undefined && currentDraftVal !== src?.value
+
+                        // Render appropriate control based on field
+                        let control: React.ReactNode
+                        if (fk === "conditionRating") {
+                          control = (
+                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                              {([1,2,3,4,5,"unable"] as (1|2|3|4|5|"unable")[]).map(r => {
+                                const isNum = typeof r === "number"
+                                const lbl = isNum ? CONDITION_LABELS[r] : "Unable"
+                                const sel = displayVal === r
+                                return <button key={String(r)} onClick={() => setObsDraft(d => ({ ...d, conditionRating: r }))}
+                                  style={{ padding: "4px 8px", fontSize: 9.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer",
+                                    background: sel ? (isNum ? CONDITION_COLORS[r] : CONDITION_UNABLE_COLOR) : C.card,
+                                    color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? (isNum ? CONDITION_COLORS[r] : CONDITION_UNABLE_COLOR) : C.border}` }}>
+                                  {lbl}
+                                </button>
+                              })}
+                            </div>
+                          )
+                        } else if (fk === "cameraAccessible") {
+                          control = (
+                            <div style={{ display: "flex", gap: 5 }}>
+                              {[true, false].map(v => {
+                                const sel = displayVal === v
+                                return <button key={String(v)} onClick={() => setObsDraft(d => ({ ...d, cameraAccessible: v }))}
+                                  style={{ flex: 1, padding: "5px", fontSize: 10.5, fontWeight: 700, borderRadius: 4, cursor: "pointer",
+                                    background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>
+                                  {v ? "YES" : "NO"}
+                                </button>
+                              })}
+                            </div>
+                          )
+                        } else if (["accessSize","stackSize","cleanoutSize","verticalPipeSize","horizontalPipeSize"].includes(fk as string)) {
+                          const opts = ['2"','3"','4"','6"','8"','10"','12"']
+                          control = (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                              {opts.map(o => {
+                                const sel = displayVal === o
+                                return <button key={o} onClick={() => setObsDraft(d => ({ ...d, [fk]: o }))}
+                                  style={{ padding: "4px 8px", fontSize: 10, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer",
+                                    background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>
+                                  {o}
+                                </button>
+                              })}
+                            </div>
+                          )
+                        } else if (fk === "accessConfig") {
+                          const opts = ["One-Way","Two-Way"]
+                          control = (
+                            <div style={{ display: "flex", gap: 5 }}>
+                              {opts.map(o => {
+                                const sel = displayVal === o
+                                return <button key={o} onClick={() => setObsDraft(d => ({ ...d, accessConfig: o }))}
+                                  style={{ flex: 1, padding: "5px", fontSize: 10, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer",
+                                    background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>
+                                  {o}
+                                </button>
+                              })}
+                            </div>
+                          )
+                        } else if (fk === "undergroundConn") {
+                          control = (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                              {CONN_OPTIONS.map(o => {
+                                const sel = displayVal === o
+                                return <button key={o} onClick={() => setObsDraft(d => ({ ...d, undergroundConn: o }))}
+                                  style={{ padding: "4px 8px", fontSize: 9.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer",
+                                    background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>
+                                  {o}
+                                </button>
+                              })}
+                            </div>
+                          )
+                        } else if (fk === "hasCleanout") {
+                          const opts: ["no"|"pre-existing"|"installed-by-us", string][] = [["no","No"],["pre-existing","Yes — pre-existing"],["installed-by-us","Yes — installed by us"]]
+                          control = (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              {opts.map(([v, lbl]) => {
+                                const sel = displayVal === v
+                                return <button key={v} onClick={() => setObsDraft(d => ({ ...d, hasCleanout: v }))}
+                                  style={{ padding: "6px 10px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", textAlign: "left",
+                                    background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>
+                                  {lbl}
+                                </button>
+                              })}
+                            </div>
+                          )
+                        } else if (fk === "stackMaterial" || fk === "cleanoutFitting") {
+                          const opts = fk === "stackMaterial"
+                            ? ["Cast Iron","Clay","PVC","ABS","Copper","Galvanised","Unknown"]
+                            : ["Wye","Tee","Sanitary tee","Combo","Unknown"]
+                          control = (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                              {opts.map(o => {
+                                const sel = displayVal === o
+                                return <button key={o} onClick={() => setObsDraft(d => ({ ...d, [fk]: o }))}
+                                  style={{ padding: "4px 8px", fontSize: 9.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer",
+                                    background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>
+                                  {o}
+                                </button>
+                              })}
+                            </div>
+                          )
+                        } else if (fk === "depth" || fk === "installDate") {
+                          control = (
+                            <input value={String(displayVal ?? "")} onChange={e => setObsDraft(d => ({ ...d, [fk]: e.target.value }))}
+                              placeholder={fk === "depth" ? "4.5 ft" : "YYYY-MM-DD"}
+                              style={{ padding: "6px 8px", fontSize: 11, border: `1px solid ${changed ? C.cyan : C.border}`, borderRadius: 4, outline: "none", fontFamily: "JetBrains Mono", width: 120 }} />
+                          )
+                        } else {
+                          control = null
+                        }
+
+                        return (
+                          <div key={String(fk)} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                              <span style={{ fontSize: 10, fontWeight: 600, color: changed ? C.cyan : C.muted }}>{FIELD_LABELS[fk] ?? String(fk)}</span>
+                              <span style={{ fontSize: 9, color: C.dim }}>{ref}</span>
+                            </div>
+                            {control}
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {/* Photos in new-obs */}
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Photos</div>
+                      {(() => {
+                        const src = latestByField.photos
+                        const currentPhotos = (src?.value as string[] | undefined) ?? []
+                        const isBasin = ["catch-basin","storm-basin","sanitary-basin"].includes(a.type)
+                        const isStackInstall = a.type === "stack" && a.hasCleanout === "installed-by-us"
+                        const photoLabels = isBasin ? ["Wider Area View","Close-Up","Inside — Lid Open"]
+                          : isStackInstall ? ["Wider Area View","Close-Up","After Clean-out Installation"]
+                          : ["Wider Area View","Close-Up"]
+                        const draftPhotos = (obsDraft.photos ?? [...currentPhotos]) as string[]
+                        return photoLabels.map((lbl, idx) => {
+                          const existing = currentPhotos[idx]
+                          const draft = draftPhotos[idx]
+                          const pickRetake = () => {
+                            const inp = document.createElement("input")
+                            inp.type = "file"; inp.accept = "image/*"
+                            inp.onchange = () => {
+                              const file = inp.files?.[0]; if (!file) return
+                              const reader = new FileReader()
+                              reader.onload = ev => {
+                                const src2 = ev.target?.result as string
+                                const next = [...draftPhotos]; next[idx] = src2
+                                setObsDraft(d => ({ ...d, photos: next }))
+                              }
+                              reader.readAsDataURL(file)
+                            }
+                            inp.click()
+                          }
+                          return (
+                            <div key={lbl} style={{ marginBottom: 8, padding: "8px 10px", borderRadius: 6, background: C.card, border: `1px solid ${C.border}` }}>
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: C.muted, letterSpacing: "0.06em", marginBottom: 6, textTransform: "uppercase" }}>{lbl}</div>
+                              {existing ? (
+                                <div>
+                                  <img src={draft || existing} alt={lbl} style={{ width: "100%", height: 70, objectFit: "cover", borderRadius: 4, display: "block" }} />
+                                  <div style={{ fontSize: 9.5, color: C.dim, marginTop: 4 }}>
+                                    Current — {SITE_PERSONS.find(p => p.id === src?.obs.observedById)?.name ?? "—"} · {src ? fmtVisitRef(src.obs) : ""}
+                                  </div>
+                                  <button onClick={pickRetake} style={{ marginTop: 4, fontSize: 9.5, color: C.cyan, background: "none", border: "none", cursor: "pointer", padding: 0, fontWeight: 700 }}>Retake</button>
+                                </div>
+                              ) : (
+                                <button onClick={pickRetake} style={{ width: "100%", padding: "8px", fontSize: 10, background: C.panel, border: `1px dashed ${C.border}`, borderRadius: 4, cursor: "pointer", color: C.muted }}>+ Add photo</button>
+                              )}
+                            </div>
+                          )
+                        })
+                      })()}
+                    </div>
+
+                    {/* Actions */}
+                    {nothingChanged && (
+                      <div style={{ fontSize: 10, color: C.dim, textAlign: "center", marginBottom: 8 }}>Use "Confirm all" when nothing has changed.</div>
+                    )}
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        onClick={doSaveObs}
+                        disabled={nothingChanged}
+                        style={{ flex: 1, padding: "9px", fontSize: 10.5, fontWeight: 700, background: nothingChanged ? C.card : C.cyan, color: nothingChanged ? C.dim : "#fff", border: `1px solid ${nothingChanged ? C.border : C.cyan}`, borderRadius: 6, cursor: nothingChanged ? "default" : "pointer" }}
+                      >Save observation</button>
+                      <button
+                        onClick={() => { setObsMode("view"); setObsDraft({}) }}
+                        style={{ padding: "9px 14px", fontSize: 10.5, fontWeight: 600, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer" }}
+                      >Cancel</button>
+                    </div>
+                  </Section>
+                )
+              }
+
+              return null
+            })()}
+
+            {/* ── Photos (all types) ───────────────────────────────────────── */}
+            {(!assetObservations.filter(o => o.assetId === selectedAsset.id).length || obsMode === null) && (() => {
+              const a = selectedAsset
               const isBasin = ["catch-basin","storm-basin","sanitary-basin"].includes(a.type)
+              const isStackWithInstall = a.type === "stack" && a.hasCleanout === "installed-by-us"
               const photoLabels = isBasin
                 ? ["Wider Area View","Close-Up","Inside — Lid Open"]
-                : ["Wider Area View","Close-Up"]
+                : isStackWithInstall
+                  ? ["Wider Area View","Close-Up","After Clean-out Installation"]
+                  : ["Wider Area View","Close-Up"]
               const photos = a.photos ?? []
               const pickPhoto = (idx: number) => {
                 const inp = document.createElement("input")
@@ -4243,6 +4952,9 @@ export default function App() {
                 </Section>
               )
             })()}
+
+            {/* ── Type-specific fields (only when no obs yet, or in edit-only mode) */}
+            {(!assetObservations.filter(o => o.assetId === selectedAsset.id).length || obsMode === null) && <>
 
             {/* ── Basin-specific ───────────────────────────────────────────── */}
             {["catch-basin","storm-basin","sanitary-basin"].includes(selectedAsset.type) && (
@@ -4325,8 +5037,8 @@ export default function App() {
               </div>
             </Section>
 
-            {/* ── Cleanout-specific ────────────────────────────────────────── */}
-            {["cleanout-floor","cleanout-stack","cleanout-foundation","cleanout-overhead"].includes(selectedAsset.type) && (
+            {/* ── Cleanout-specific (floor, foundation, overhead) ──────────── */}
+            {["cleanout-floor","cleanout-foundation","cleanout-overhead"].includes(selectedAsset.type) && (
               <Section>
                 <Label>Clean-out Access Size</Label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -4347,7 +5059,7 @@ export default function App() {
                 </div>
               </Section>
             )}
-            {["cleanout-floor","cleanout-stack"].includes(selectedAsset.type) && (
+            {selectedAsset.type === "cleanout-floor" && (
               <Section>
                 <Label>Underground Connection</Label>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
@@ -4362,7 +5074,7 @@ export default function App() {
                 )}
               </Section>
             )}
-            {["cleanout-stack","cleanout-overhead"].includes(selectedAsset.type) && (
+            {selectedAsset.type === "cleanout-overhead" && (
               <Section>
                 <Label>Vertical Pipe Size</Label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -4384,13 +5096,117 @@ export default function App() {
             )}
 
             {/* ── Stack ────────────────────────────────────────────────────── */}
-            {selectedAsset.type === "stack-no-cleanout" && (
+            {selectedAsset.type === "stack" && (() => {
+              const a = selectedAsset
+              const hasAccess = a.hasCleanout === "pre-existing" || a.hasCleanout === "installed-by-us"
+              const sizeOpts = ['2"','3"','4"','6"','8"','10"','12"']
+              const materialOpts = ["Cast Iron","Clay","PVC","ABS","Copper","Galvanised","Unknown"]
+              const coSizeOpts = ['2"','3"','4"','6"','8"']
+              const fittingOpts = ["Wye","Tee","Sanitary tee","Combo","Unknown"]
+              return (
+                <>
+                  {/* Stack size */}
+                  <Section>
+                    <Label>Stack Size</Label>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                      {sizeOpts.map(opt => {
+                        const sel = a.stackSize === opt
+                        return <button key={opt} onClick={() => updateAsset(a.id, { stackSize: sel ? undefined : opt }, "stack size — " + opt)} style={{ padding: "5px 9px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                      })}
+                    </div>
+                  </Section>
+                  {/* Stack material */}
+                  <Section>
+                    <Label>Stack Material</Label>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                      {materialOpts.map(opt => {
+                        const sel = a.stackMaterial === opt
+                        return <button key={opt} onClick={() => updateAsset(a.id, { stackMaterial: sel ? undefined : opt }, "stack material — " + opt)} style={{ padding: "5px 9px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                      })}
+                    </div>
+                  </Section>
+                  {/* Has clean-out */}
+                  <Section>
+                    <Label>Has a Clean-out</Label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      {([["no","No","#DC2626"],["pre-existing","Yes — pre-existing","#00803E"],["installed-by-us","Yes — installed by us","#00803E"]] as [string,string,string][]).map(([val, label, col]) => {
+                        const sel = a.hasCleanout === val
+                        const prevVal = a.hasCleanout
+                        return (
+                          <button key={val} onClick={() => {
+                            if (sel) return
+                            updateAsset(a.id, { hasCleanout: val as "no"|"pre-existing"|"installed-by-us" }, `clean-out — ${label.toLowerCase()}`)
+                            if (val === "installed-by-us" && prevVal === "no") {
+                              // Log the installation event explicitly
+                              const sizeStr = a.cleanoutSize ? a.cleanoutSize : ""
+                              const fitStr = a.cleanoutFitting ? a.cleanoutFitting : ""
+                              appendLog(`${a.label} clean-out installed${sizeStr || fitStr ? " — " + [sizeStr, fitStr].filter(Boolean).join(" ") : ""}`)
+                            }
+                          }}
+                            style={{ padding: "8px 12px", fontSize: 11, fontWeight: sel ? 700 : 500, borderRadius: 5, cursor: sel ? "default" : "pointer", background: sel ? col : C.card, color: sel ? "#fff" : C.muted, border: `1.5px solid ${sel ? col : C.border}`, textAlign: "left" }}>
+                            {label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {a.hasCleanout === "no" && (
+                      <div style={{ marginTop: 8, padding: "10px 12px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6 }}>
+                        <div style={{ fontSize: 10.5, fontWeight: 700, color: "#DC2626", marginBottom: 3 }}>No access on this stack.</div>
+                        <div style={{ fontSize: 10, color: "#7F1D1D", lineHeight: 1.5 }}>A clean-out must be cut in — wye by default — before this line can be cameraed.</div>
+                      </div>
+                    )}
+                  </Section>
+                  {/* Clean-out details — only when has access */}
+                  {hasAccess && (
+                    <>
+                      <Section>
+                        <Label>Clean-out Size</Label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                          {coSizeOpts.map(opt => {
+                            const sel = a.cleanoutSize === opt
+                            return <button key={opt} onClick={() => updateAsset(a.id, { cleanoutSize: sel ? undefined : opt }, "cleanout size — " + opt)} style={{ padding: "5px 9px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                          })}
+                        </div>
+                      </Section>
+                      <Section>
+                        <Label>Fitting</Label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                          {fittingOpts.map(opt => {
+                            const sel = a.cleanoutFitting === opt
+                            return <button key={opt} onClick={() => updateAsset(a.id, { cleanoutFitting: sel ? undefined : opt }, "cleanout fitting — " + opt)} style={{ padding: "5px 9px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                          })}
+                        </div>
+                      </Section>
+                      <Section>
+                        <Label>Underground Connection</Label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                          {CONN_OPTIONS.map(opt => {
+                            const sel = a.undergroundConn === opt
+                            return <button key={opt} onClick={() => updateAsset(a.id, { undergroundConn: sel ? undefined : opt }, "underground connection — " + opt)} style={{ padding: "4px 9px", fontSize: 9.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                          })}
+                        </div>
+                      </Section>
+                      <Section>
+                        <Label>Vertical Pipe Size</Label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                          {sizeOpts.map(opt => {
+                            const sel = a.verticalPipeSize === opt
+                            return <button key={opt} onClick={() => updateAsset(a.id, { verticalPipeSize: sel ? undefined : opt }, "vertical pipe size — " + opt)} style={{ padding: "5px 9px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>{opt}</button>
+                          })}
+                        </div>
+                      </Section>
+                    </>
+                  )}
+                </>
+              )
+            })()}
+
+            {/* ── Stack camera inspection gate ─────────────────────────────── */}
+            {selectedAsset.type === "stack" && selectedAsset.hasCleanout === "no" && (
               <Section>
-                <Label>Stack Size</Label>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input type="number" value={selectedAsset.stackSize ?? ""} onChange={e => updateAsset(selectedAsset.id, { stackSize: e.target.value }, "stack size — " + e.target.value)}
-                    placeholder="4" style={{ width: 70, padding: "6px 8px", fontSize: 12, fontFamily: "JetBrains Mono", border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", textAlign: "center" }} />
-                  <span style={{ fontSize: 12, color: C.muted }}>in</span>
+                <div style={{ padding: "10px 12px", background: "#FEF9EC", border: "1px solid #FDE68A", borderRadius: 6 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: "#92400E", marginBottom: 2 }}>+ Camera Inspection disabled</div>
+                  <div style={{ fontSize: 10, color: "#78350F", lineHeight: 1.5 }}>No access on this stack. Cut in a clean-out first.</div>
                 </div>
               </Section>
             )}
@@ -4522,6 +5338,8 @@ export default function App() {
                 )}
               </>
             )}
+
+            </>}
 
             {/* ── Connected Pipes ──────────────────────────────────────────── */}
             <Section>
@@ -6302,6 +7120,127 @@ export default function App() {
                   )
                 })()
               )}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── FIELD HISTORY OVERLAY ────────────────────────────────────────────────── */}
+      {obsFieldHistoryField && selectedAsset && (() => {
+        const fk = obsFieldHistoryField
+        const myObs = assetObservations
+          .filter(o => o.assetId === selectedAsset.id && o[fk] !== undefined)
+          .sort((a, b) => b.observedAt - a.observedAt)
+        const FIELD_LABELS_OVL: Partial<Record<keyof AssetObservation, string>> = {
+          conditionRating: "Condition", depth: "Depth",
+          accessSize: "Access size", accessConfig: "Access config",
+          undergroundConn: "Underground conn", cameraAccessible: "Camera accessible",
+          verticalPipeSize: "Vertical pipe size", horizontalPipeSize: "Horizontal pipe size",
+          stackSize: "Stack size", stackMaterial: "Stack material",
+          hasCleanout: "Has clean-out", cleanoutSize: "Clean-out size", cleanoutFitting: "Fitting",
+          photos: "Photos",
+        }
+        function fmtFieldValue2(k: keyof AssetObservation, v: unknown): string {
+          if (v === undefined || v === null) return "—"
+          if (typeof v === "boolean") return v ? "Yes" : "No"
+          if (k === "conditionRating") return typeof v === "number" ? CONDITION_LABELS[v] : String(v)
+          if (k === "photos") return Array.isArray(v) ? String((v as string[]).filter(Boolean).length) + " photos" : "0"
+          return String(v)
+        }
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ position: "absolute", inset: 0, background: "rgba(15,25,35,0.45)", backdropFilter: "blur(2px)" }} onClick={() => setObsFieldHistoryField(null)} />
+            <div style={{ position: "relative", background: C.panel, borderRadius: 10, boxShadow: "0 8px 32px rgba(0,0,0,0.22)", width: 380, maxWidth: "90vw", overflow: "hidden" }}>
+              <div style={{ padding: "14px 18px 10px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: C.text, letterSpacing: "0.1em", textTransform: "uppercase" }}>{FIELD_LABELS_OVL[fk] ?? String(fk)}</div>
+                <button onClick={() => setObsFieldHistoryField(null)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted, fontSize: 18, lineHeight: 1, padding: 0 }}>×</button>
+              </div>
+              <div style={{ padding: "12px 18px", maxHeight: 400, overflowY: "auto" }}>
+                {myObs.length === 0
+                  ? <div style={{ fontSize: 11, color: C.dim }}>No history for this field.</div>
+                  : myObs.map((obs, i) => {
+                    const v = visits.find(x => x.id === obs.visitId)
+                    const person = SITE_PERSONS.find(p => p.id === obs.observedById)
+                    const val = fmtFieldValue2(fk, obs[fk])
+                    const isLatest = i === 0
+                    return (
+                      <div key={obs.id} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: i < myObs.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 4 }}>
+                          <span style={{ fontSize: 16, fontFamily: "JetBrains Mono", fontWeight: 700, color: isLatest ? C.cyan : C.text }}>{val}</span>
+                          {isLatest && <span style={{ fontSize: 9, fontWeight: 700, color: C.cyan, letterSpacing: "0.08em" }}>CURRENT</span>}
+                        </div>
+                        <div style={{ fontSize: 10, color: C.muted }}>
+                          {v?.visitType ?? "—"} · {new Date(obs.observedAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })} · {person?.name ?? "—"} · {obs.jobNumber ?? "—"}
+                        </div>
+                        {obs.changeReason && obs.changeReason !== "unchanged" && (
+                          <div style={{ fontSize: 9.5, color: obs.changeReason === "work-by-us" ? "#00803E" : obs.changeReason === "correction" ? C.muted : C.blue, marginTop: 3 }}>
+                            {obs.changeReason === "work-by-us" ? "changed — work performed by us"
+                              : obs.changeReason === "work-by-others" ? "changed — work by another party"
+                              : "corrected — earlier reading was wrong"}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── OBSERVATION CHANGE DIALOG ─────────────────────────────────────────────── */}
+      {obsChangeDialog && (() => {
+        const { changes, depthOnly, onResolve } = obsChangeDialog
+        const sinceObs = assetObservations
+          .filter(o => selectedAsset && o.assetId === selectedAsset.id)
+          .sort((a, b) => a.observedAt - b.observedAt)
+          .slice(-1)[0]
+        const sinceVisit = sinceObs ? visits.find(v => v.id === sinceObs.visitId) : null
+        const sinceLabel = sinceVisit
+          ? `${sinceVisit.visitType} · ${new Date(sinceObs!.observedAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })}`
+          : "the previous observation"
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ position: "absolute", inset: 0, background: "rgba(15,25,35,0.45)", backdropFilter: "blur(2px)" }} />
+            <div style={{ position: "relative", background: C.panel, borderRadius: 10, boxShadow: "0 8px 32px rgba(0,0,0,0.22)", width: 400, maxWidth: "90vw", overflow: "hidden" }}>
+              <div style={{ padding: "14px 18px 10px", borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: C.text, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>Something Changed</div>
+                <div style={{ fontSize: 10, color: C.muted }}>Since {sinceLabel}</div>
+              </div>
+              <div style={{ padding: "12px 18px" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+                  {changes.map(c => (
+                    <div key={String(c.field)} style={{ display: "flex", gap: 8, fontSize: 11 }}>
+                      <span style={{ flex: "0 0 130px", color: C.muted }}>
+                        {({ conditionRating: "Condition", depth: "Depth", accessSize: "Access size", accessConfig: "Access config",
+                          undergroundConn: "Underground conn", verticalPipeSize: "Vertical pipe size",
+                          horizontalPipeSize: "Horizontal pipe size", stackSize: "Stack size",
+                          stackMaterial: "Stack material", hasCleanout: "Has clean-out",
+                          cleanoutSize: "Clean-out size", cleanoutFitting: "Fitting",
+                          installDate: "Install date", cameraAccessible: "Camera accessible" } as Record<string, string>)[String(c.field)] ?? String(c.field)}
+                      </span>
+                      <span style={{ fontFamily: "JetBrains Mono", color: C.dim }}>{String(c.from ?? "—")}</span>
+                      <span style={{ color: C.dim }}>→</span>
+                      <span style={{ fontFamily: "JetBrains Mono", color: C.text, fontWeight: 700 }}>{String(c.to ?? "—")}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: C.text, marginBottom: 10 }}>
+                  {depthOnly ? "Was this a mismeasurement?" : "Was work performed on this asset?"}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {!depthOnly && (
+                    <>
+                      <button onClick={() => onResolve("work-by-us")} style={{ padding: "10px 14px", fontSize: 11, fontWeight: 700, background: "#00803E", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>Yes — by us</button>
+                      <button onClick={() => onResolve("work-by-others")} style={{ padding: "10px 14px", fontSize: 11, fontWeight: 700, background: C.blue, color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>Yes — by someone else</button>
+                    </>
+                  )}
+                  <button onClick={() => onResolve("correction")} style={{ padding: "10px 14px", fontSize: 11, fontWeight: 600, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer", textAlign: "left" }}>No — the earlier reading was wrong</button>
+                  {depthOnly && (
+                    <button onClick={() => onResolve("unchanged")} style={{ padding: "10px 14px", fontSize: 11, fontWeight: 600, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer", textAlign: "left" }}>Keep both readings</button>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         )
