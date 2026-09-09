@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react"
+import { useState, useRef, useCallback, useEffect, Fragment } from "react"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -26,7 +26,7 @@ interface ConfirmDialogState {
   message: string
   onConfirm: () => void
 }
-type ObsType = "tie-in" | "defect" | "excavation" | "direction-change" | "pipe-transition"
+type ObsType = "tie-in" | "defect" | "excavation" | "direction-change" | "pipe-transition" | "start-of-pipe" | "end-of-pipe"
 type Severity = 1 | 2 | 3 | 4 | 5
 
 interface Asset {
@@ -102,6 +102,7 @@ interface Pipe {
   toX?: number
   toY?: number
   waypoints: RoutePoint[]  // intermediate routing points
+  geometryStatus?: "stub" | "drawn"
   length: string
   slope: string
   start?: PipeEndpoint
@@ -234,6 +235,10 @@ interface AssetObservation {
   cameraAccessible?: boolean
   photos?: string[]
   changeReason?: "work-by-us" | "work-by-others" | "correction" | "unchanged"
+  accessible: boolean
+  inaccessibleReason?: string
+  inaccessibleNotes?: string
+  inaccessibleMedia?: string[]
 }
 
 interface VisitLogEntry {
@@ -404,37 +409,60 @@ const SAMPLE_ASSETS: Asset[] = [
   { id: "a7", type: "stack",           label: "STK-002", x: 65, y: 38, hasCleanout: "no", stackSize: '3"', stackMaterial: "Cast Iron" },
 ]
 
-// Two sample observations per asset for a3 (cleanout-floor: 3"→4", not-accessible→accessible)
-// and a2 (catch-basin: with two photos in slot 0)
 const SAMPLE_OBSERVATIONS: AssetObservation[] = [
-  // a3 · CF-001 — first visit (Master Plan, Dino, job #48770, 14 Mar)
+  // a3 · CF-001 — first visit (Diagnostic, Dino, job #48770, 14 Mar 2024)
   {
     id: "obs-a3-1", assetId: "a3", visitId: "sv1", observedAt: new Date("2024-03-14").getTime(),
-    observedById: "p-dino", jobNumber: "#48770",
+    observedById: "p-dino", jobNumber: "#48770", accessible: true,
     accessSize: '3"', accessConfig: "One-Way", undergroundConn: "Wye",
     cameraAccessible: false, conditionRating: 3,
   },
-  // a3 · CF-001 — second visit (Emergency Call, Nicholas, job #48812, 12 Jun)
+  // a3 · CF-001 — second visit (Excavation, Nicholas, job #48812, 12 Jun 2024)
   {
     id: "obs-a3-2", assetId: "a3", visitId: "sv2", observedAt: new Date("2024-06-12").getTime(),
-    observedById: "p-nicholas", jobNumber: "#48812",
+    observedById: "p-nicholas", jobNumber: "#48812", accessible: true,
     accessSize: '4"', cameraAccessible: true,
     changeReason: "work-by-others",
   },
-  // a2 · CB-001 — first visit (Master Plan, Dino, job #48770, 14 Mar) — with a photo
+  // a2 · CB-001 — first visit (Diagnostic, Dino, job #48770, 14 Mar 2024) — with a photo
   {
     id: "obs-a2-1", assetId: "a2", visitId: "sv1", observedAt: new Date("2024-03-14").getTime(),
-    observedById: "p-dino", jobNumber: "#48770",
+    observedById: "p-dino", jobNumber: "#48770", accessible: true,
     conditionRating: 2, depth: "4.5",
     photos: ["data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgZmlsbD0iIzMzNDQ1NSIvPjx0ZXh0IHg9IjEwMCIgeT0iODAiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM2Njc3ODgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNhbWVyYSBwaG90bywgMTQgTWFyPC90ZXh0Pjwvc3ZnPg=="],
   },
-  // a2 · CB-001 — second visit (Office Update, Dino, no job, 22 Feb 2025)
+  // a2 · CB-001 — second visit (Diagnostic Alexis, no job, 22 Feb 2025) — with correction photo
   {
     id: "obs-a2-2", assetId: "a2", visitId: "sv3", observedAt: new Date("2025-02-22").getTime(),
-    observedById: "p-dino", jobNumber: undefined,
+    observedById: "p-dino", jobNumber: undefined, accessible: true,
     conditionRating: 3,
     photos: ["data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjE1MCIgZmlsbD0iIzQ0NTU2NiIvPjx0ZXh0IHg9IjEwMCIgeT0iODAiIGZvbnQtc2l6ZT0iMTQiIGZpbGw9IiM3Nzg4OTkiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkZvbGxvdy11cCBwaG90bywgMjIgRmViPC90ZXh0Pjwvc3ZnPg=="],
     changeReason: "correction",
+  },
+  // a1 · SAB-001 — two consecutive inaccessible observations (escalation demo)
+  {
+    id: "obs-a1-1", assetId: "a1", visitId: "sv1", observedAt: new Date("2024-03-14").getTime(),
+    observedById: "p-dino", jobNumber: "#48770", accessible: false,
+    inaccessibleReason: "Locked room — no key",
+    inaccessibleNotes: "Mechanical room B-12, manager said custodian has the key but wasn't on site.",
+  },
+  {
+    id: "obs-a1-2", assetId: "a1", visitId: "sv3", observedAt: new Date("2024-06-18").getTime(),
+    observedById: "p-nicholas", jobNumber: "#48812", accessible: false,
+    inaccessibleReason: "Locked room — no key",
+    inaccessibleNotes: "Same room, still locked. Requested key from office.",
+  },
+  // a4 · FD-001 — one inaccessible observation (banner demo)
+  {
+    id: "obs-a4-1", assetId: "a4", visitId: "sv1", observedAt: new Date("2024-03-14").getTime(),
+    observedById: "p-dino", jobNumber: "#48770", accessible: true,
+    conditionRating: 2, flowTestDone: true, flowTestResult: true,
+  },
+  {
+    id: "obs-a4-2", assetId: "a4", visitId: "sv3", observedAt: new Date("2025-06-12").getTime(),
+    observedById: "p-alexis", jobNumber: "#48901", accessible: false,
+    inaccessibleReason: "Vehicle parked over it",
+    inaccessibleNotes: "Silver sedan, plate ABC-1234. Manager said resident parks there nightly.",
   },
 ]
 
@@ -474,6 +502,13 @@ const SAMPLE_PIPES: Pipe[] = [
     waypoints: [], length: "54", slope: "2.1%",
     videos: []
   },
+  {
+    id: "p5", label: "PIPE-005", fromId: "a3", toId: null,
+    toX: 85, toY: 55,
+    waypoints: [], length: "", slope: "",
+    geometryStatus: "stub",
+    videos: []
+  },
 ]
 
 // ── Colours ────────────────────────────────────────────────────────────────────
@@ -496,6 +531,8 @@ const OBS_COLOR: Record<ObsType, string> = {
   "excavation": "#38424E",
   "direction-change": "#7333D6",
   "pipe-transition": "#00803E",
+  "start-of-pipe": "#0369A1",
+  "end-of-pipe": "#0369A1",
 }
 
 const OBS_LABEL: Record<ObsType, string> = {
@@ -504,6 +541,8 @@ const OBS_LABEL: Record<ObsType, string> = {
   "excavation": "EXCAVATION",
   "direction-change": "DIRECTION CHANGE",
   "pipe-transition": "PIPE TRANSITION",
+  "start-of-pipe": "START OF PIPE",
+  "end-of-pipe": "END OF PIPE",
 }
 
 const SEV_LABEL = ["", "MINOR", "LIGHT", "MODERATE", "SEVERE", "URGENT"]
@@ -578,7 +617,7 @@ function ownershipFor(ag: string): string {
   return "Association"
 }
 
-const STEP_TITLES = ["", "Set up", "Push", "Why the camera stopped", "Upload the recording", "Sewer camera analysis", "Was the pipe fully inspected?", "Characteristics"]
+const STEP_TITLES = ["", "Set up", "Push", "Why the camera stopped", "Upload the recording", "Sewer camera analysis", "Characteristics"]
 
 // ── Asset icons ────────────────────────────────────────────────────────────────
 
@@ -1265,7 +1304,8 @@ const OBS_VERSIONED_KEYS: (keyof AssetObservation)[] = [
 ]
 
 function projectAsset(asset: Asset, obs: AssetObservation[]): Asset {
-  const mine = obs.filter(o => o.assetId === asset.id).sort((a, b) => b.observedAt - a.observedAt)
+  // Only accessible observations carry field values; inaccessible ones don't update the projection
+  const mine = obs.filter(o => o.assetId === asset.id && o.accessible !== false).sort((a, b) => b.observedAt - a.observedAt)
   if (mine.length === 0) return asset
   const patch: Partial<Asset> = {}
   for (const key of OBS_VERSIONED_KEYS) {
@@ -1346,6 +1386,7 @@ export default function App() {
   const [drawFrom, setDrawFrom] = useState<string | null>(null)        // assetId start
   const [drawFromCoord, setDrawFromCoord] = useState<{ x: number; y: number; pipeId: string } | null>(null) // pipe-snap start
   const [drawPoints, setDrawPoints] = useState<RoutePoint[]>([])
+  const [finishingStubId, setFinishingStubId] = useState<string | null>(null) // pipe id being finished from stub
   const [hoverAssetId, setHoverAssetId] = useState<string | null>(null)
   const [drawMouse, setDrawMouse] = useState<{ x: number; y: number } | null>(null)
   const [drawHoverPtIdx, setDrawHoverPtIdx] = useState<number | null>(null) // index of drawPoint being hovered for removal
@@ -1452,9 +1493,14 @@ export default function App() {
   const [incompletePipeIds, setIncompletePipeIds] = useState<Set<string>>(new Set())
   // Stepper state
   const [editingStep, setEditingStep] = useState<number | null>(null)
-  const [step1Form, setStep1Form] = useState({ purpose: "", launchedFrom: "", direction: "downstream" as "upstream"|"downstream", zeroRef: "At the pipe entry", entryPipeSize: "", entryPipeType: "", entryDepth: "" })
-  const [step3Form, setStep3Form] = useState({ whyStopped: "", stopFootage: "0", stopNotes: "" })
-  const [step6Form, setStep6Form] = useState({ fullyInspected: "" as "Yes"|"Partially"|"No"|"", notFullyReason: "", assessableFootage: "0" })
+  const [step1Form, setStep1Form] = useState({ launchedFrom: "", direction: "downstream" as "upstream"|"downstream", zeroRef: "At the pipe entry" })
+  const [step3Form, setStep3Form] = useState({ whyStopped: "", stopFootage: "0", fullyInspected: "" as "Yes"|"Partially"|"No"|"", notFullyReason: "", assessableFootage: "0", stopNotes: "" })
+  const [startPipeForm, setStartPipeForm] = useState({ pipeType: "", pipeSize: "" })
+  const [endPipeForm, setEndPipeForm] = useState({ pipeType: "", pipeSize: "" })
+  const [startPipeSaved, setStartPipeSaved] = useState<string | null>(null) // videoId of saved start
+  const [endPipeSaved, setEndPipeSaved] = useState<string | null>(null)   // videoId of saved end
+  const [obsStepMismatch, setObsStepMismatch] = useState<{ startType: string; startSize: string; endType: string; endSize: string; stopFt: string } | null>(null)
+  const [finishDrawingPipeId, setFinishDrawingPipeId] = useState<string | null>(null)
   const [step7Rows, setStep7Rows] = useState<CharRow[]>([])
   const [charRowEditing, setCharRowEditing] = useState<string | null>(null)
 
@@ -1591,15 +1637,21 @@ export default function App() {
     if (!selectedVideoId || !selectedPipeId) return
     const vid = pipes.find(p => p.id === selectedPipeId)?.videos.find(v => v.id === selectedVideoId)
     if (!vid) return
-    setStep1Form({ purpose: vid.purpose ?? "", launchedFrom: vid.launchedFrom ?? "", direction: vid.direction, zeroRef: vid.zeroRef ?? "At the pipe entry", entryPipeSize: vid.entryPipeSize ?? "", entryPipeType: vid.entryPipeType ?? "", entryDepth: vid.entryDepth ?? "" })
-    setStep3Form({ whyStopped: vid.whyStopped ?? "", stopFootage: vid.stopFootage ?? "0", stopNotes: vid.stopNotes ?? "" })
-    setStep6Form({ fullyInspected: (vid.fullyInspected ?? "") as "Yes"|"Partially"|"No"|"", notFullyReason: vid.notFullyReason ?? "", assessableFootage: vid.assessableFootage ?? "0" })
+    setStep1Form({ launchedFrom: vid.launchedFrom ?? "", direction: vid.direction, zeroRef: vid.zeroRef ?? "At the pipe entry" })
+    // Pre-fill start/end pipe forms from existing start-of-pipe / end-of-pipe observations
+    const sopObs = vid.observations.find(o => o.type === "start-of-pipe")
+    const eopObs = vid.observations.find(o => o.type === "end-of-pipe")
+    setStartPipeForm({ pipeType: sopObs?.pipeType ?? "", pipeSize: sopObs?.pipeSize ?? "" })
+    setEndPipeForm({ pipeType: eopObs?.pipeType ?? "", pipeSize: eopObs?.pipeSize ?? "" })
+    setStartPipeSaved(sopObs ? selectedVideoId : null)
+    setEndPipeSaved(eopObs ? selectedVideoId : null)
+    setStep3Form({ whyStopped: vid.whyStopped ?? "", stopFootage: vid.stopFootage ?? "0", fullyInspected: (vid.fullyInspected ?? "") as "Yes"|"Partially"|"No"|"", notFullyReason: vid.notFullyReason ?? "", assessableFootage: vid.assessableFootage ?? "0", stopNotes: vid.stopNotes ?? "" })
     const chars = vid.characteristics
     if (chars && chars.length > 0) {
       setStep7Rows(chars)
     } else {
       setStep7Rows([
-        { id: "start", isStart: true, length: "0", depth: vid.entryDepth ?? "", aboveGround: "", ownership: "Association" },
+        { id: "start", isStart: true, length: "0", depth: "", aboveGround: "", ownership: "Association" },
         { id: "end", isEnd: true, length: vid.stopFootage ?? "", depth: "", aboveGround: "", ownership: "Association" },
       ])
     }
@@ -1668,6 +1720,34 @@ export default function App() {
     const last = drawPoints[drawPoints.length - 1]
     const toAssetId = last.assetId ?? null
     const waypoints = drawPoints.slice(0, toAssetId ? -1 : undefined).map(({ x, y }) => ({ x, y }))
+
+    if (finishingStubId) {
+      // Update existing stub pipe
+      const stubPipe = pipes.find(p => p.id === finishingStubId)
+      const endLabel = toAssetId ? assets.find(a => a.id === toAssetId)?.label : "free endpoint"
+      setPipes(prev => prev.map(p => p.id === finishingStubId ? {
+        ...p,
+        toId: toAssetId,
+        toX: toAssetId ? undefined : last.x,
+        toY: toAssetId ? undefined : last.y,
+        waypoints,
+        geometryStatus: "drawn",
+      } : p))
+      appendLog(`${stubPipe?.label ?? finishingStubId} path drawn — ends at ${endLabel ?? "free endpoint"}`)
+      setFinishingStubId(null)
+      setDrawFrom(null)
+      setDrawFromCoord(null)
+      setDrawPoints([])
+      setDrawMouse(null)
+      setDrawHoverPtIdx(null)
+      setHoverAssetId(null)
+      setMode("view")
+      setSelectedPipeId(finishingStubId)
+      setSelectedAssetId(null)
+      setSelectedVideoId(null)
+      return
+    }
+
     const newPipe: Pipe = {
       id: `p${Date.now()}`,
       label: `PIPE-${String(pipes.length + 1).padStart(3, "0")}`,
@@ -1678,23 +1758,46 @@ export default function App() {
       toX: toAssetId ? undefined : last.x,
       toY: toAssetId ? undefined : last.y,
       waypoints,
+      geometryStatus: toAssetId ? "drawn" : "stub",
       length: "", slope: "",
       videos: [],
     }
-    createPipe(newPipe)
-    setDrawFrom(null)
-    setDrawFromCoord(null)
-    setDrawPoints([])
-    setDrawMouse(null)
-    setDrawHoverPtIdx(null)
-    setHoverAssetId(null)
-    setMode("view")
-    setSelectedPipeId(newPipe.id)
-    setSelectedAssetId(null)
-    setSelectedVideoId(null)
-    setEditingPipe(true)
-    setPipeForm({ start: { type: "", diameter: "", depth: "" }, end: { type: "", diameter: "", depth: "" }, length: "", slope: "", transitions: [] })
-  }, [drawFrom, drawFromCoord, drawPoints, pipes])
+    if (finishDrawingPipeId) {
+      // Completing a stub — update existing pipe, set geometryStatus to drawn
+      setPipes(prev => prev.map(p => p.id === finishDrawingPipeId ? {
+        ...p,
+        toId: toAssetId,
+        toX: toAssetId ? undefined : last.x,
+        toY: toAssetId ? undefined : last.y,
+        waypoints,
+        geometryStatus: "drawn" as const,
+      } : p))
+      setFinishDrawingPipeId(null)
+      setDrawFrom(null)
+      setDrawFromCoord(null)
+      setDrawPoints([])
+      setDrawMouse(null)
+      setDrawHoverPtIdx(null)
+      setHoverAssetId(null)
+      setMode("view")
+      setSelectedPipeId(finishDrawingPipeId)
+      setSelectedAssetId(null)
+    } else {
+      createPipe(newPipe)
+      setDrawFrom(null)
+      setDrawFromCoord(null)
+      setDrawPoints([])
+      setDrawMouse(null)
+      setDrawHoverPtIdx(null)
+      setHoverAssetId(null)
+      setMode("view")
+      setSelectedPipeId(newPipe.id)
+      setSelectedAssetId(null)
+      setSelectedVideoId(null)
+      setEditingPipe(true)
+      setPipeForm({ start: { type: "", diameter: "", depth: "" }, end: { type: "", diameter: "", depth: "" }, length: "", slope: "", transitions: [] })
+    }
+  }, [drawFrom, drawFromCoord, drawPoints, pipes, finishDrawingPipeId])
 
   const handleMapClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (dragId || mode === "select-area") return
@@ -1898,6 +2001,16 @@ export default function App() {
     const pipe = pipes.find(p => p.id === selectedPipeId)
     if (!pipe) return
     updatePipe(selectedPipeId, { videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, ...fields } : v) }, "inspection updated")
+  }
+
+  const savePipeEndObs = (kind: "start-of-pipe" | "end-of-pipe", pipeType: string, pipeSize: string, footage: string) => {
+    if (!selectedPipeId || !selectedVideoId) return
+    const pipe = pipes.find(p => p.id === selectedPipeId)
+    if (!pipe) return
+    const obs: Observation = { id: `obs${Date.now()}`, type: kind, footage, pipeType, pipeSize }
+    updatePipe(selectedPipeId, {
+      videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, observations: [...v.observations.filter(o => o.type !== kind), obs] } : v)
+    }, `${kind} recorded — ${pipeSize} ${pipeType}`)
   }
 
   const saveObservation = () => {
@@ -2793,7 +2906,15 @@ export default function App() {
           const outstanding: OutstandingItem[] = []
 
           activeAssets.forEach(a => {
-            const meta = ASSET_META[a.type]
+            // Inaccessible during this visit — documentation gap, never pricing blocker
+            const thisVisitObs = currentVisitId
+              ? assetObservations.filter(o => o.assetId === a.id && o.visitId === currentVisitId)
+              : []
+            const inaccessThisVisit = thisVisitObs.some(o => o.accessible === false)
+            if (inaccessThisVisit) {
+              const reason = thisVisitObs.find(o => o.accessible === false)?.inaccessibleReason ?? "unknown reason"
+              outstanding.push({ id: a.id, label: a.label, issue: `not accessed — ${reason.toLowerCase()}`, blocking: false })
+            }
             if (!a.conditionRating) outstanding.push({ id: a.id, label: a.label, issue: "condition not set", blocking: true })
             if (!a.location) outstanding.push({ id: a.id, label: a.label, issue: "location not set", blocking: true })
             const needsDepth = ["catch-basin","storm-basin","sanitary-basin"].includes(a.type)
@@ -3100,10 +3221,16 @@ export default function App() {
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: sel ? C.cyan : C.text, fontFamily: "JetBrains Mono" }}>{asset.label}</div>
-                      <div style={{ fontSize: 10, color: C.muted }}>{ASSET_META[asset.type].label} · {cnt} pipe{cnt !== 1 ? "s" : ""}</div>
+                      {latestObs?.accessible === false
+                        ? <div style={{ fontSize: 10, color: "#A96B00", fontWeight: 600 }}>not accessed · {(latestObs.inaccessibleReason ?? "").split(" ").slice(0,3).join(" ").toLowerCase()}</div>
+                        : <div style={{ fontSize: 10, color: C.muted }}>{ASSET_META[asset.type].label} · {cnt} pipe{cnt !== 1 ? "s" : ""}</div>
+                      }
                     </div>
-                    {isStale && (
+                    {isStale && latestObs?.accessible !== false && (
                       <div title="Not observed in over a year." style={{ fontSize: 9.5, color: "#A96B00", flexShrink: 0 }}>⚠ {staleMonths}mo</div>
+                    )}
+                    {latestObs?.accessible === false && (
+                      <div style={{ fontSize: 10, color: "#DC2626", flexShrink: 0 }}>⚠</div>
                     )}
                   </div>
                 )
@@ -3872,6 +3999,7 @@ export default function App() {
               const toX = toAsset ? toAsset.x : (pipe.toX ?? frX)
               const toY = toAsset ? toAsset.y : (pipe.toY ?? frY)
               const isFree = !toAsset
+              const isStub = pipe.geometryStatus === "stub" || (!pipe.geometryStatus && isFree)
               const sel = selectedPipeId === pipe.id
               const hov = hoverPipeId === pipe.id
               const hasVid = pipe.videos.length > 0
@@ -3928,21 +4056,29 @@ export default function App() {
                     <line key={`v${i}`}
                       x1={`${pt.x}%`} y1={`${pt.y}%`}
                       x2={`${pts[i + 1].x}%`} y2={`${pts[i + 1].y}%`}
-                      stroke={lineColor} strokeWidth={(sel ? 2.5 : 1.8) * pipeScale}
-                      strokeDasharray={sel ? undefined : "9 5"}
-                      markerEnd={sel && i === pts.length - 2 ? "url(#arrow)" : undefined}
+                      stroke={isStub ? (sel ? "#0369A1" : "#60A5FA") : lineColor}
+                      strokeWidth={(sel ? 2.5 : 1.8) * pipeScale}
+                      strokeDasharray={isStub ? "5 4" : sel ? undefined : "9 5"}
+                      markerEnd={!isStub && sel && i === pts.length - 2 ? "url(#arrow)" : undefined}
                       style={{ pointerEvents: "none", transition: "stroke 0.15s" }}
                     />
                   ))}
                   {/* Waypoint dots */}
                   {(pipe.waypoints ?? []).map((wp, i) => (
                     <circle key={`wp${i}`} cx={`${wp.x}%`} cy={`${wp.y}%`} r="3"
-                      fill={lineColor} stroke={C.panel} strokeWidth="1.2"
+                      fill={isStub ? "#60A5FA" : lineColor} stroke={C.panel} strokeWidth="1.2"
                       style={{ pointerEvents: "none" }}
                     />
                   ))}
-                  {/* Free endpoint dot */}
-                  {isFree && (
+                  {/* Stub open-circle endpoint (unfinished) */}
+                  {isStub && (
+                    <circle cx={`${toX}%`} cy={`${toY}%`} r="5"
+                      fill={C.panel} stroke={sel ? "#0369A1" : "#60A5FA"} strokeWidth="1.8"
+                      style={{ pointerEvents: "none" }}
+                    />
+                  )}
+                  {/* Drawn free endpoint dot (not stub) */}
+                  {isFree && !isStub && (
                     <circle cx={`${toX}%`} cy={`${toY}%`} r="4"
                       fill={sel ? C.blue : "#B0C4D8"} stroke={C.panel} strokeWidth="1.5"
                       style={{ pointerEvents: "none" }}
@@ -4069,30 +4205,39 @@ export default function App() {
           {/* Asset nodes */}
           {assets.filter(a => !a.archived).map(asset => {
             const assetOutOfView = activeViewIncludedAssets ? !activeViewIncludedAssets.includes(asset.id) : false
+            const latestAssetObs = assetObservations
+              .filter(o => o.assetId === asset.id)
+              .sort((x, y) => y.observedAt - x.observedAt)[0]
+            const mapInaccessible = latestAssetObs?.accessible === false
             return (
-              <AssetNode
-                key={asset.id}
-                asset={asset}
-                selected={selectedAssetId === asset.id}
-                scale={iconScaleByType[asset.type] ?? 1}
-                onClick={_e => handleAssetClick(asset.id)}
-                onMouseDown={e => handleAssetMouseDown(e, asset.id)}
-                onTouchStart={e => {
-                  if (e.touches.length !== 1) return
-                  e.stopPropagation()
-                  const { clientX, clientY } = getTouchXY(e)
-                  handleAssetMouseDown({ clientX, clientY, stopPropagation: () => {} } as React.MouseEvent, asset.id)
-                }}
-                onMouseEnter={() => setHoverAssetId(asset.id)}
-                onMouseLeave={() => setHoverAssetId(prev => prev === asset.id ? null : prev)}
-                drawState={
-                  drawFrom === asset.id ? "start"
-                  : drawPoints.some(p => p.assetId === asset.id) ? "snapped"
-                  : (mode === "draw-pipe" && (drawFrom || drawFromCoord) && hoverAssetId === asset.id) ? "target"
-                  : null
-                }
-                dimmed={assetOutOfView}
-              />
+              <Fragment key={asset.id}>
+                <AssetNode
+                  asset={asset}
+                  selected={selectedAssetId === asset.id}
+                  scale={iconScaleByType[asset.type] ?? 1}
+                  onClick={_e => handleAssetClick(asset.id)}
+                  onMouseDown={e => handleAssetMouseDown(e, asset.id)}
+                  onTouchStart={e => {
+                    if (e.touches.length !== 1) return
+                    e.stopPropagation()
+                    const { clientX, clientY } = getTouchXY(e)
+                    handleAssetMouseDown({ clientX, clientY, stopPropagation: () => {} } as React.MouseEvent, asset.id)
+                  }}
+                  onMouseEnter={() => setHoverAssetId(asset.id)}
+                  onMouseLeave={() => setHoverAssetId(prev => prev === asset.id ? null : prev)}
+                  drawState={
+                    drawFrom === asset.id ? "start"
+                    : drawPoints.some(p => p.assetId === asset.id) ? "snapped"
+                    : (mode === "draw-pipe" && (drawFrom || drawFromCoord) && hoverAssetId === asset.id) ? "target"
+                    : null
+                  }
+                  dimmed={assetOutOfView}
+                />
+                {mapInaccessible && (
+                  <div title="Not accessed — last observation was inaccessible"
+                    style={{ position: "absolute", left: `${asset.x}%`, top: `${asset.y}%`, transform: "translate(6px, -14px)", width: 10, height: 10, borderRadius: "50%", background: "#DC2626", border: "1.5px solid #fff", zIndex: 12, pointerEvents: "none" }} />
+                )}
+              </Fragment>
             )
           })}
 
@@ -4468,6 +4613,7 @@ export default function App() {
                   observedAt: Date.now(),
                   observedById: person,
                   jobNumber: currentVisit?.jobId ? SAMPLE_JOBS.find(j => j.id === currentVisit.jobId)?.number : undefined,
+                  accessible: true,
                   ...patch,
                   changeReason: reason,
                 }
@@ -4549,9 +4695,18 @@ export default function App() {
               // ── Latest state view ─────────────────────────────────────────
               if (hasObs && obsMode !== "new-obs") {
                 const firstObs = myObs[myObs.length - 1]
-                const lastObs = myObs[0]
                 const createdPerson = SITE_PERSONS.find(p => p.id === firstObs.observedById)
                 const fields = relevantFields(a.type)
+                // Latest obs (sorted newest first)
+                const latestObs = myObs[0]
+                const isLatestInaccessible = latestObs && latestObs.accessible === false
+                // Consecutive inaccessible count from the front
+                let consecutiveInaccessible = 0
+                for (const o of myObs) {
+                  if (o.accessible === false) consecutiveInaccessible++
+                  else break
+                }
+                const isEscalated = consecutiveInaccessible >= 3
                 return (
                   <>
                     {/* Provenance */}
@@ -4560,6 +4715,30 @@ export default function App() {
                         Added by {createdPerson?.name ?? "—"} · {fmtVisitRef(firstObs)}
                       </div>
                     </Section>
+
+                    {/* Inaccessibility banner */}
+                    {isLatestInaccessible && (() => {
+                      const inaccessPerson = SITE_PERSONS.find(p => p.id === latestObs.observedById)
+                      const inaccessVisit = visits.find(v => v.id === latestObs.visitId)
+                      const dates = myObs.filter(o => o.accessible === false).map(o => fmtDate(o.observedAt)).slice(0, 3).join(" · ")
+                      return (
+                        <div
+                          onClick={() => setObsViewingId(latestObs.id)}
+                          style={{ margin: "0 16px 4px", padding: "10px 14px", background: isEscalated ? "#FFF1F2" : "#FEF9EC", border: `1px solid ${isEscalated ? "#FECACA" : "#FDE68A"}`, borderRadius: 7, cursor: "pointer" }}
+                        >
+                          <div style={{ fontSize: 10, fontWeight: 700, color: isEscalated ? "#DC2626" : "#92400E", marginBottom: 3 }}>
+                            ⚠ {isEscalated ? `NOT ACCESSED ON THE LAST ${consecutiveInaccessible} VISITS` : `NOT ACCESSED — ${fmtDate(latestObs.observedAt)}`}
+                          </div>
+                          {isEscalated
+                            ? <div style={{ fontSize: 10, color: "#7F1D1D" }}>{dates} — {latestObs.inaccessibleReason?.toLowerCase() ?? ""} each time</div>
+                            : <div style={{ fontSize: 10, color: "#78350F", lineHeight: 1.5 }}>
+                                {latestObs.inaccessibleReason} · {inaccessPerson?.name ?? "—"} · {inaccessVisit?.visitType ?? "—"}<br/>
+                                Values below are from the last successful observation.
+                              </div>
+                          }
+                        </div>
+                      )
+                    })()}
 
                     {/* Latest state */}
                     <Section>
@@ -4610,10 +4789,11 @@ export default function App() {
                             const v = visits.find(x => x.id === obs.visitId)
                             const fieldSummary = obsFieldNames(obs)
                             const cnt = obsFieldCount(obs)
+                            const isInacc = obs.accessible === false
                             return (
                               <div key={obs.id}
                                 onClick={() => setObsViewingId(obs.id === obsViewingId ? null : obs.id)}
-                                style={{ padding: "9px 12px", borderRadius: 6, background: obsViewingId === obs.id ? "#E0F0FA" : C.card, border: `1px solid ${obsViewingId === obs.id ? C.cyan : C.border}`, cursor: "pointer" }}
+                                style={{ padding: "9px 12px", borderRadius: 6, background: obsViewingId === obs.id ? (isInacc ? "#FFF1F2" : "#E0F0FA") : (isInacc ? "#FEF9EC" : C.card), border: `1px solid ${obsViewingId === obs.id ? (isInacc ? "#FECACA" : C.cyan) : (isInacc ? "#FDE68A" : C.border)}`, cursor: "pointer" }}
                               >
                                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                   <span style={{ fontSize: 10.5, fontFamily: "JetBrains Mono", color: C.muted, flexShrink: 0 }}>{fmtDate(obs.observedAt)}</span>
@@ -4621,21 +4801,36 @@ export default function App() {
                                   <span style={{ fontSize: 10.5, color: C.muted }}>{person?.name ?? "—"}</span>
                                   <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto", fontFamily: "JetBrains Mono" }}>{obs.jobNumber ?? "—"}</span>
                                 </div>
-                                <div style={{ fontSize: 10, color: C.dim, marginTop: 3 }}>
-                                  {cnt > 0 ? (cnt === 1 ? fieldSummary : `${cnt} fields recorded`) : "No fields"}
+                                <div style={{ fontSize: 10, color: isInacc ? "#92400E" : C.dim, marginTop: 3, fontWeight: isInacc ? 600 : 400 }}>
+                                  {isInacc
+                                    ? `not accessed — ${(obs.inaccessibleReason ?? "").toLowerCase()}`
+                                    : cnt > 0 ? (cnt === 1 ? fieldSummary : `${cnt} fields recorded`) : "No fields"
+                                  }
                                 </div>
                                 {obsViewingId === obs.id && (
                                   <div style={{ marginTop: 8, borderTop: `1px solid ${C.border}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-                                    {OBS_VERSIONED_KEYS.filter(k => obs[k as keyof AssetObservation] !== undefined).map(k => (
-                                      <div key={String(k)} style={{ display: "flex", gap: 8, fontSize: 10 }}>
-                                        <span style={{ color: C.muted, flex: "0 0 110px" }}>{FIELD_LABELS[k as keyof AssetObservation] ?? String(k)}</span>
-                                        <span style={{ fontFamily: "JetBrains Mono", color: C.text }}>{fmtFieldValue(k as keyof AssetObservation, obs[k as keyof AssetObservation])}</span>
-                                      </div>
-                                    ))}
-                                    {obs.changeReason && obs.changeReason !== "unchanged" && (
-                                      <div style={{ marginTop: 4, fontSize: 10, color: obs.changeReason === "work-by-us" ? "#00803E" : obs.changeReason === "work-by-others" ? C.blue : C.muted, fontWeight: 600 }}>
-                                        {obs.changeReason === "work-by-us" ? "Work performed by us" : obs.changeReason === "work-by-others" ? "Work by another party" : "Earlier reading corrected"}
-                                      </div>
+                                    {isInacc ? (
+                                      <>
+                                        {obs.inaccessibleReason && <div style={{ fontSize: 10, color: "#92400E", fontWeight: 600 }}>{obs.inaccessibleReason}</div>}
+                                        {obs.inaccessibleNotes && <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.5 }}>{obs.inaccessibleNotes}</div>}
+                                        {obs.inaccessibleMedia?.map((src2, i) => (
+                                          <img key={i} src={src2} alt="" style={{ width: "100%", height: 70, objectFit: "cover", borderRadius: 4 }} />
+                                        ))}
+                                      </>
+                                    ) : (
+                                      <>
+                                        {OBS_VERSIONED_KEYS.filter(k => obs[k as keyof AssetObservation] !== undefined).map(k => (
+                                          <div key={String(k)} style={{ display: "flex", gap: 8, fontSize: 10 }}>
+                                            <span style={{ color: C.muted, flex: "0 0 110px" }}>{FIELD_LABELS[k as keyof AssetObservation] ?? String(k)}</span>
+                                            <span style={{ fontFamily: "JetBrains Mono", color: C.text }}>{fmtFieldValue(k as keyof AssetObservation, obs[k as keyof AssetObservation])}</span>
+                                          </div>
+                                        ))}
+                                        {obs.changeReason && obs.changeReason !== "unchanged" && (
+                                          <div style={{ marginTop: 4, fontSize: 10, color: obs.changeReason === "work-by-us" ? "#00803E" : obs.changeReason === "work-by-others" ? C.blue : C.muted, fontWeight: 600 }}>
+                                            {obs.changeReason === "work-by-us" ? "Work performed by us" : obs.changeReason === "work-by-others" ? "Work by another party" : "Earlier reading corrected"}
+                                          </div>
+                                        )}
+                                      </>
                                     )}
                                   </div>
                                 )}
@@ -4656,10 +4851,145 @@ export default function App() {
                   ? `${currentVisit.visitType} · ${new Date(currentVisit.startedAt).toLocaleDateString("en-US", { month: "long", day: "numeric" })} · ${SITE_PERSONS.find(p => p.id === currentVisit.personId)?.name ?? "—"}${currentVisit.jobId ? " · job " + (SAMPLE_JOBS.find(j => j.id === currentVisit.jobId)?.number ?? "") : ""}`
                   : "No active visit — observation will be stamped to the last visit"
 
+                const draftAccessible = (obsDraft as Record<string, unknown>).accessible as boolean | undefined
+
+                const INACCESSIBLE_REASONS = [
+                  "Vehicle parked over it",
+                  "Locked room — no key",
+                  "Blocked by stored items",
+                  "Buried under landscaping or mulch",
+                  "Under snow or ice",
+                  "Resident not home",
+                  "Area under construction",
+                  "Standing water over it",
+                  "Could not locate it",
+                  "Unsafe to approach",
+                  "Other",
+                ]
+
                 return (
                   <Section>
                     <div style={{ fontSize: 9, fontWeight: 700, color: C.cyan, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>NEW OBSERVATION · {a.label}</div>
                     <div style={{ fontSize: 10, color: C.muted, marginBottom: 12, lineHeight: 1.5 }}>{visitLabel}</div>
+
+                    {/* Accessibility gate — always first */}
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: C.text, marginBottom: 8, letterSpacing: "0.04em" }}>
+                        COULD YOU ACCESS IT TODAY? <span style={{ color: "#DC2626" }}>*</span>
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {[true, false].map(v => {
+                          const sel = draftAccessible === v
+                          return (
+                            <button key={String(v)} onClick={() => setObsDraft(d => ({ ...d, accessible: v, inaccessibleReason: v ? undefined : (d as Record<string,unknown>).inaccessibleReason as string | undefined }))}
+                              style={{ flex: 1, padding: "10px", fontSize: 11, fontWeight: 700, borderRadius: 6, cursor: "pointer",
+                                background: sel ? (v ? "#00803E" : "#DC2626") : C.card,
+                                color: sel ? "#fff" : C.muted,
+                                border: `1.5px solid ${sel ? (v ? "#00803E" : "#DC2626") : C.border}` }}>
+                              {v ? "YES" : "NO"}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Inaccessible form */}
+                    {draftAccessible === false && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
+                        <div>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Why <span style={{ color: "#DC2626" }}>*</span></div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            {INACCESSIBLE_REASONS.map(r => {
+                              const sel = (obsDraft as Record<string,unknown>).inaccessibleReason === r
+                              return (
+                                <button key={r} onClick={() => setObsDraft(d => ({ ...d, inaccessibleReason: r }))}
+                                  style={{ padding: "7px 10px", fontSize: 10.5, fontWeight: sel ? 700 : 400, textAlign: "left", borderRadius: 5, cursor: "pointer",
+                                    background: sel ? "#FEF2F2" : C.card,
+                                    color: sel ? "#DC2626" : C.muted,
+                                    border: `1px solid ${sel ? "#FECACA" : C.border}` }}>
+                                  {r}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginBottom: 4 }}>Details</div>
+                          <textarea
+                            value={String((obsDraft as Record<string,unknown>).inaccessibleNotes ?? "")}
+                            onChange={e => setObsDraft(d => ({ ...d, inaccessibleNotes: e.target.value }))}
+                            placeholder="Silver sedan, plate ABC-1234. Manager said resident parks there nightly."
+                            rows={3}
+                            style={{ width: "100%", padding: "7px 9px", fontSize: 10.5, border: `1px solid ${C.border}`, borderRadius: 5, outline: "none", resize: "vertical", fontFamily: "'DM Sans', sans-serif", boxSizing: "border-box", color: C.text }}
+                          />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Photos or video</div>
+                          <button
+                            onClick={() => {
+                              const inp = document.createElement("input")
+                              inp.type = "file"; inp.accept = "image/*,video/*"; inp.multiple = true
+                              inp.onchange = () => {
+                                const files = Array.from(inp.files ?? [])
+                                files.forEach(file => {
+                                  const reader = new FileReader()
+                                  reader.onload = ev => {
+                                    const src2 = ev.target?.result as string
+                                    setObsDraft(d => {
+                                      const prev = ((d as Record<string,unknown>).inaccessibleMedia ?? []) as string[]
+                                      return { ...d, inaccessibleMedia: [...prev, src2] }
+                                    })
+                                  }
+                                  reader.readAsDataURL(file)
+                                })
+                              }
+                              inp.click()
+                            }}
+                            style={{ width: "100%", padding: "8px", fontSize: 10, background: C.panel, border: `1px dashed ${C.border}`, borderRadius: 5, cursor: "pointer", color: C.muted }}>
+                            + Add photo or video
+                          </button>
+                          {((obsDraft as Record<string,unknown>).inaccessibleMedia as string[] | undefined)?.map((src2, i) => (
+                            <img key={i} src={src2} alt="" style={{ width: "100%", height: 70, objectFit: "cover", borderRadius: 4, marginTop: 6, display: "block" }} />
+                          ))}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                          <button
+                            onClick={() => {
+                              const reason = (obsDraft as Record<string,unknown>).inaccessibleReason as string | undefined
+                              if (!reason) return
+                              const visitId2 = currentVisitId ?? "sv1"
+                              const person2 = currentVisit?.personId ?? "p-dino"
+                              const obs2: AssetObservation = {
+                                id: `obs-${Date.now()}`,
+                                assetId: a.id, visitId: visitId2, observedAt: Date.now(),
+                                observedById: person2,
+                                jobNumber: currentVisit?.jobId ? SAMPLE_JOBS.find(j => j.id === currentVisit?.jobId)?.number : undefined,
+                                accessible: false,
+                                inaccessibleReason: reason,
+                                inaccessibleNotes: (obsDraft as Record<string,unknown>).inaccessibleNotes as string | undefined,
+                                inaccessibleMedia: (obsDraft as Record<string,unknown>).inaccessibleMedia as string[] | undefined,
+                              }
+                              setAssetObservations(prev => [...prev, obs2])
+                              appendLog(`${a.label} not accessed — ${reason.toLowerCase()}`)
+                              setObsMode("view"); setObsDraft({})
+                            }}
+                            disabled={!(obsDraft as Record<string,unknown>).inaccessibleReason}
+                            style={{ flex: 1, padding: "9px", fontSize: 10.5, fontWeight: 700,
+                              background: (obsDraft as Record<string,unknown>).inaccessibleReason ? "#DC2626" : C.card,
+                              color: (obsDraft as Record<string,unknown>).inaccessibleReason ? "#fff" : C.dim,
+                              border: "none", borderRadius: 6, cursor: (obsDraft as Record<string,unknown>).inaccessibleReason ? "pointer" : "default" }}>
+                            Save
+                          </button>
+                          <button onClick={() => { setObsMode("view"); setObsDraft({}) }}
+                            style={{ padding: "9px 14px", fontSize: 10.5, fontWeight: 600, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer" }}>
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Accessible — show full form */}
+                    {draftAccessible === true && <>
 
                     {/* Confirm all */}
                     <button
@@ -4679,11 +5009,12 @@ export default function App() {
                         const changed = currentDraftVal !== undefined && currentDraftVal !== src?.value
 
                         // Render appropriate control based on field
-                        let control: React.ReactNode
+                        let control = null as unknown
                         if (fk === "conditionRating") {
                           control = (
                             <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                              {([1,2,3,4,5,"unable"] as (1|2|3|4|5|"unable")[]).map(r => {
+                              {(["1","2","3","4","5","unable"]).map(rStr => {
+                                const r = rStr === "unable" ? "unable" : parseInt(rStr) as 1|2|3|4|5
                                 const isNum = typeof r === "number"
                                 const lbl = isNum ? CONDITION_LABELS[r] : "Unable"
                                 const sel = displayVal === r
@@ -4751,12 +5082,13 @@ export default function App() {
                             </div>
                           )
                         } else if (fk === "hasCleanout") {
-                          const opts: ["no"|"pre-existing"|"installed-by-us", string][] = [["no","No"],["pre-existing","Yes — pre-existing"],["installed-by-us","Yes — installed by us"]]
+                          const opts = [["no","No"],["pre-existing","Yes — pre-existing"],["installed-by-us","Yes — installed by us"]]
                           control = (
                             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                               {opts.map(([v, lbl]) => {
                                 const sel = displayVal === v
-                                return <button key={v} onClick={() => setObsDraft(d => ({ ...d, hasCleanout: v }))}
+                                const hcVal = v as "no"|"pre-existing"|"installed-by-us"
+                                return <button key={v} onClick={() => setObsDraft(d => ({ ...d, hasCleanout: hcVal }))}
                                   style={{ padding: "6px 10px", fontSize: 10.5, fontWeight: sel ? 700 : 500, borderRadius: 4, cursor: "pointer", textAlign: "left",
                                     background: sel ? C.cyan : C.card, color: sel ? "#fff" : C.muted, border: `1px solid ${sel ? C.cyan : C.border}` }}>
                                   {lbl}
@@ -4796,7 +5128,7 @@ export default function App() {
                               <span style={{ fontSize: 10, fontWeight: 600, color: changed ? C.cyan : C.muted }}>{FIELD_LABELS[fk] ?? String(fk)}</span>
                               <span style={{ fontSize: 9, color: C.dim }}>{ref}</span>
                             </div>
-                            {control}
+                            {control as React.ReactNode}
                           </div>
                         )
                       })}
@@ -4867,6 +5199,12 @@ export default function App() {
                         style={{ padding: "9px 14px", fontSize: 10.5, fontWeight: 600, background: C.card, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer" }}
                       >Cancel</button>
                     </div>
+                    </>}
+
+                    {/* Prompt when accessibility not yet answered */}
+                    {draftAccessible === undefined && (
+                      <div style={{ fontSize: 10, color: C.dim, textAlign: "center", marginTop: 4 }}>Answer the accessibility question to continue.</div>
+                    )}
                   </Section>
                 )
               }
@@ -5129,7 +5467,8 @@ export default function App() {
                   <Section>
                     <Label>Has a Clean-out</Label>
                     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                      {([["no","No","#DC2626"],["pre-existing","Yes — pre-existing","#00803E"],["installed-by-us","Yes — installed by us","#00803E"]] as [string,string,string][]).map(([val, label, col]) => {
+                      {(["no|No|#DC2626","pre-existing|Yes — pre-existing|#00803E","installed-by-us|Yes — installed by us|#00803E"]).map(entry => {
+                        const [val, label, col] = entry.split("|")
                         const sel = a.hasCleanout === val
                         const prevVal = a.hasCleanout
                         return (
@@ -5422,17 +5761,60 @@ export default function App() {
               </div>
             </Section>
 
+            {/* Stub banner */}
+            {selectedPipe.geometryStatus === "stub" && (
+              <div style={{ margin: "0 16px 0", padding: "10px 12px", borderRadius: 7, background: "#FFFBF0", border: "1px solid #F59E0B66", display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#A96B00", letterSpacing: "0.06em", textTransform: "uppercase" }}>⚠ Path not drawn</div>
+                <div style={{ fontSize: 10, color: "#92400E", lineHeight: 1.45 }}>Finish the drawing once you know where it runs.</div>
+                <button
+                  onClick={() => {
+                    setFinishDrawingPipeId(selectedPipe.id)
+                    setMode("draw-pipe")
+                    const fr = assets.find(a => a.id === selectedPipe.fromId)
+                    if (fr) setDrawFrom(selectedPipe.fromId)
+                    setDrawPoints([{ x: selectedPipe.toX ?? (fr?.x ?? 0), y: selectedPipe.toY ?? (fr?.y ?? 0) }])
+                    setSelectedPipeId(null)
+                  }}
+                  style={{ alignSelf: "flex-start", padding: "5px 12px", fontSize: 10, fontWeight: 700, background: "#A96B00", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
+                >
+                  Finish drawing
+                </button>
+              </div>
+            )}
+
+            {/* Length comparison (drawn path vs stop footage) */}
+            {selectedPipe.geometryStatus === "drawn" && selectedPipe.length && (() => {
+              const stopFt = selectedPipe.videos.reduce((acc, v) => {
+                const ft = parseFloat(v.stopFootage ?? "")
+                return !isNaN(ft) && ft > 0 ? ft : acc
+              }, 0)
+              if (!stopFt) return null
+              const drawnFt = parseFloat(selectedPipe.length)
+              if (isNaN(drawnFt) || drawnFt <= 0) return null
+              const diff = Math.abs(drawnFt - stopFt) / stopFt
+              const pct = (diff * 100).toFixed(0)
+              const color = diff < 0.05 ? "#00803E" : "#A96B00"
+              return (
+                <div style={{ margin: "0 16px 0", padding: "8px 12px", borderRadius: 7, background: diff < 0.05 ? "#E8F4EF" : "#FFFBF0", border: `1px solid ${color}44` }}>
+                  <div style={{ fontSize: 10, color, fontFamily: "JetBrains Mono", lineHeight: 1.6 }}>
+                    Inspected {stopFt} ft · drawn path measures {drawnFt} ft · {pct}% longer
+                    {diff > 0.15 && <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 9.5, color: "#A96B00", marginTop: 2 }}>Check the traced path or the reel counter.</div>}
+                  </div>
+                </div>
+              )
+            })()}
+
             {/* Pipe Overview */}
             {(() => {
               const pipe = selectedPipe
 
-              // Source video: most recent complete (inspStep>=8), else most recent with characteristics
-              const completeVids = pipe.videos.filter(v => (v.inspStep || 1) >= 8)
+              // Source video: most recent complete (inspStep>=7), else most recent with characteristics
+              const completeVids = pipe.videos.filter(v => (v.inspStep || 1) >= 7)
               const sourceVideo = completeVids.length > 0
                 ? completeVids[completeVids.length - 1]
                 : pipe.videos.slice().reverse().find(v => v.characteristics && v.characteristics.length >= 2)
               const newerIncomplete = completeVids.length > 0 && pipe.videos.some(v =>
-                (v.inspStep || 1) < 8 && pipe.videos.indexOf(v) > pipe.videos.indexOf(completeVids[completeVids.length - 1])
+                (v.inspStep || 1) < 7 && pipe.videos.indexOf(v) > pipe.videos.indexOf(completeVids[completeVids.length - 1])
               )
 
               // Keep legacy auto-fill logic (best video with runStart+runEnd)
@@ -5548,6 +5930,26 @@ export default function App() {
                       )}
                     </div>
                   )}
+
+                  {/* Inspected vs drawn length comparison */}
+                  {(() => {
+                    const stopFt = pipe.videos.reduce((max, v) => {
+                      const f = parseFloat(v.stopFootage || "0")
+                      return f > max ? f : max
+                    }, 0)
+                    const drawnFt = parseFloat(pipe.length || "0")
+                    if (stopFt <= 0 || drawnFt <= 0 || pipe.geometryStatus === "stub") return null
+                    const diff = Math.abs(drawnFt - stopFt) / stopFt
+                    const pct = Math.round(diff * 100)
+                    const compColor = diff < 0.05 ? "#00803E" : "#A96B00"
+                    return (
+                      <div style={{ marginBottom: 12, padding: "8px 10px", borderRadius: 5, background: compColor + "10", border: `1px solid ${compColor}33`, fontSize: 10, color: compColor, lineHeight: 1.5 }}>
+                        <span style={{ fontFamily: "JetBrains Mono", fontWeight: 700 }}>Inspected {stopFt.toFixed(0)} ft</span>
+                        {" · "}drawn path measures {drawnFt} ft{" · "}{pct}% {drawnFt > stopFt ? "longer" : "shorter"}
+                        {diff > 0.15 && <div style={{ marginTop: 4 }}>Check the traced path or the reel counter.</div>}
+                      </div>
+                    )
+                  })()}
 
                   {/* Auto-fill banner */}
                   {hasPendingUpdate && !editingPipe && (
@@ -5760,7 +6162,7 @@ export default function App() {
               )}
               {selectedPipe.videos.map(video => {
                 const isOpen = selectedVideoId === video.id
-                const completeVids2 = selectedPipe.videos.filter(v => (v.inspStep || 1) >= 8)
+                const completeVids2 = selectedPipe.videos.filter(v => (v.inspStep || 1) >= 7)
                 const isActiveSource = completeVids2.length > 0 && completeVids2[completeVids2.length - 1].id === video.id
                 return (
                   <div key={video.id} style={{ marginBottom: 6, borderRadius: 6, border: `1px solid ${isOpen ? "#0369A1" : C.border}`, background: isOpen ? "#E0F0FA" : C.card, overflow: "hidden" }}>
@@ -5778,7 +6180,7 @@ export default function App() {
                           </div>
                           {isActiveSource && <span style={{ flexShrink: 0, fontSize: 8, fontWeight: 700, letterSpacing: "0.06em", padding: "1px 5px", borderRadius: 3, background: "#E8F4EF", color: "#00803E", border: "1px solid #00803E33" }}>OVERVIEW</span>}
                         </div>
-                        <div style={{ fontSize: 9.5, color: C.muted, marginTop: 1 }}>{video.date} · {video.observations.length} obs. · {(video.inspStep || 1) >= 8 ? <span style={{ color: "#00803E", fontWeight: 700 }}>Complete</span> : `Step ${Math.min(video.inspStep || 1, 7)} of 7`}</div>
+                        <div style={{ fontSize: 9.5, color: C.muted, marginTop: 1 }}>{video.date} · {video.observations.length} obs. · {(video.inspStep || 1) >= 7 ? <span style={{ color: "#00803E", fontWeight: 700 }}>Complete</span> : `Step ${Math.min(video.inspStep || 1, 6)} of 6`}</div>
                       </div>
                       <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
                         <button
@@ -5888,7 +6290,9 @@ export default function App() {
 
               const cippCount = sv.observations.filter(o => o.cippConcern).length
               const cippMissing = sv.observations.filter(o => o.cippConcern && (!o.cippDepth || !o.cippLocateClose || !o.cippLocateWide)).length
-              const step5Complete = sv.observationsClosed && cippMissing === 0
+              const hasStartOfPipe = sv.observations.some(o => o.type === "start-of-pipe")
+              const hasEndOfPipe = sv.observations.some(o => o.type === "end-of-pipe")
+              const step5Complete = sv.observationsClosed && cippMissing === 0 && hasStartOfPipe && hasEndOfPipe
 
               return (
               <div style={{ borderTop: `2px solid ${C.border}` }}>
@@ -5896,7 +6300,7 @@ export default function App() {
                 {/* Stepper header */}
                 <div style={{ padding: "10px 16px 10px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>CAMERA INSPECTION · STEP {Math.min(step, 7)} OF 7</div>
+                    <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>CAMERA INSPECTION · STEP {Math.min(step, 6)} OF 6</div>
                     <div style={{ fontSize: 13, fontWeight: 700, color: "#16202A", fontFamily: "JetBrains Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sv.name}</div>
                   </div>
                   <button onClick={() => setInspectionFullscreen(true)} title="Full screen" style={{ flexShrink: 0, padding: "5px 10px", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.05em", background: "#16202A", color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
@@ -5908,66 +6312,52 @@ export default function App() {
                 </div>
 
                 {/* ── Step 1 — Set up ───────────────────────────────────────── */}
-                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(1) ? 0.45 : 1 }}>
-                  {stepHdr(1, [sv.purpose, sv.direction, sv.entryPipeSize, sv.entryPipeType, sv.entryDepth ? `${fmtFtIn(sv.entryDepth)} deep` : ""].filter(Boolean).join(" · "))}
-                  {isActive(1) && (
-                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
-                      <div>
-                        <FieldLabel text="PURPOSE *" />
-                        <select value={step1Form.purpose} onChange={e => setStep1Form(f => ({ ...f, purpose: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
-                          <option value="">— select —</option>
-                          {PURPOSE_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <FieldLabel text="LAUNCHED FROM *" />
-                        <input value={step1Form.launchedFrom} onChange={e => setStep1Form(f => ({ ...f, launchedFrom: e.target.value }))} placeholder="e.g. CF-01" style={inputSt} />
-                      </div>
-                      <div>
-                        <FieldLabel text="DIRECTION *" />
-                        <div style={{ display: "flex", gap: 6 }}>
-                          {(["downstream","upstream"] as const).map(d => (
-                            <button key={d} onClick={() => setStep1Form(f => ({ ...f, direction: d }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step1Form.direction === d ? C.cyan : C.card, color: step1Form.direction === d ? "#fff" : C.muted, border: `1.5px solid ${step1Form.direction === d ? C.cyan : C.border}`, textTransform: "capitalize" }}>{d}</button>
-                          ))}
-                        </div>
-                      </div>
-                      <div>
-                        <FieldLabel text="ZERO REFERENCE *" />
-                        <select value={step1Form.zeroRef} onChange={e => setStep1Form(f => ({ ...f, zeroRef: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
-                          {ZERO_REF_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-                        </select>
-                        <div style={{ marginTop: 4, fontSize: 9, color: C.muted, lineHeight: 1.4 }}>Footage measured along the pipe, not from the floor. Keep this consistent between inspections of the same run or their footages won't line up.</div>
-                      </div>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {(() => {
+                  // If pipe has exactly one access point, pre-fill launchedFrom read-only
+                  const pipeAccessIds = [sv && selectedPipe ? (selectedPipe.fromId !== "free" ? selectedPipe.fromId : null) : null, selectedPipe?.toId ?? null].filter(Boolean)
+                  const singleAccess = pipeAccessIds.length === 1
+                  const accessLabel = singleAccess ? (assets.find(a => a.id === pipeAccessIds[0])?.label ?? "") : ""
+                  const lf = singleAccess ? accessLabel : step1Form.launchedFrom
+                  const step1Ready = lf && step1Form.direction && step1Form.zeroRef
+                  return (
+                  <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(1) ? 0.45 : 1 }}>
+                    {stepHdr(1, [sv.launchedFrom, sv.direction, sv.zeroRef].filter(Boolean).join(" · "))}
+                    {isActive(1) && (
+                      <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
                         <div>
-                          <FieldLabel text="PIPE SIZE AT ENTRY *" />
-                          <select value={step1Form.entryPipeSize} onChange={e => setStep1Form(f => ({ ...f, entryPipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                            <option value="">—</option>
-                            {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-                          </select>
+                          <FieldLabel text="LAUNCHED FROM *" />
+                          {singleAccess
+                            ? <div style={{ ...inputSt, background: C.bg, color: C.muted, cursor: "default", userSelect: "none" as const }}>{accessLabel}</div>
+                            : <input value={step1Form.launchedFrom} onChange={e => setStep1Form(f => ({ ...f, launchedFrom: e.target.value }))} placeholder="e.g. CF-01" style={inputSt} />
+                          }
                         </div>
                         <div>
-                          <FieldLabel text="PIPE TYPE AT ENTRY *" />
-                          <select value={step1Form.entryPipeType} onChange={e => setStep1Form(f => ({ ...f, entryPipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                            <option value="">—</option>
-                            {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                          </select>
+                          <FieldLabel text="DIRECTION *" />
+                          <div style={{ display: "flex", gap: 6 }}>
+                            {(["downstream","upstream"] as const).map(d => (
+                              <button key={d} onClick={() => setStep1Form(f => ({ ...f, direction: d }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step1Form.direction === d ? C.cyan : C.card, color: step1Form.direction === d ? "#fff" : C.muted, border: `1.5px solid ${step1Form.direction === d ? C.cyan : C.border}`, textTransform: "capitalize" }}>{d}</button>
+                            ))}
+                          </div>
                         </div>
+                        <div>
+                          <FieldLabel text="ZERO REFERENCE *" />
+                          <select value={step1Form.zeroRef} onChange={e => setStep1Form(f => ({ ...f, zeroRef: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                            {ZERO_REF_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                          <div style={{ marginTop: 4, fontSize: 9, color: C.muted, lineHeight: 1.4 }}>Footage measured along the pipe, not from the floor. Keep this consistent between inspections of the same run or their footages won't line up.</div>
+                        </div>
+                        <button
+                          disabled={!step1Ready}
+                          onClick={() => { updateVideo({ launchedFrom: lf, direction: step1Form.direction, zeroRef: step1Form.zeroRef, inspStep: Math.max(step, 2) }); setEditingStep(null) }}
+                          style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: step1Ready ? "pointer" : "default", background: step1Ready ? "#16202A" : C.card, color: step1Ready ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
+                        >
+                          {editingStep === 1 ? "Save Changes" : "Next →"}
+                        </button>
                       </div>
-                      <div>
-                        <FieldLabel text="DEPTH AT ENTRY (ft) *" />
-                        <input type="number" value={step1Form.entryDepth} onChange={e => setStep1Form(f => ({ ...f, entryDepth: e.target.value }))} style={inputSt} placeholder="ft" />
-                      </div>
-                      <button
-                        disabled={!step1Form.purpose || !step1Form.launchedFrom || !step1Form.direction || !step1Form.zeroRef || !step1Form.entryPipeSize || !step1Form.entryPipeType || !step1Form.entryDepth}
-                        onClick={() => { updateVideo({ purpose: step1Form.purpose, launchedFrom: step1Form.launchedFrom, direction: step1Form.direction, zeroRef: step1Form.zeroRef, entryPipeSize: step1Form.entryPipeSize, entryPipeType: step1Form.entryPipeType, entryDepth: step1Form.entryDepth, inspStep: Math.max(step, 2) }); setEditingStep(null) }}
-                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: (step1Form.purpose && step1Form.launchedFrom && step1Form.entryPipeSize && step1Form.entryPipeType && step1Form.entryDepth) ? "#16202A" : C.card, color: (step1Form.purpose && step1Form.launchedFrom && step1Form.entryPipeSize && step1Form.entryPipeType && step1Form.entryDepth) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
-                      >
-                        {editingStep === 1 ? "Save Changes" : "Next →"}
-                      </button>
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                  )
+                })()}
 
                 {/* ── Step 2 — Push ─────────────────────────────────────────── */}
                 <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(2) ? 0.45 : 1 }}>
@@ -5986,7 +6376,11 @@ export default function App() {
 
                 {/* ── Step 3 — Why the camera stopped ───────────────────────── */}
                 <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(3) ? 0.45 : 1 }}>
-                  {stepHdr(3, [sv.whyStopped, sv.stopFootage ? `stopped at ${fmtFtIn(sv.stopFootage)}` : ""].filter(Boolean).join(" · "))}
+                  {stepHdr(3, (() => {
+                    const parts = [sv.whyStopped, sv.stopFootage ? `stopped at ${fmtFtIn(sv.stopFootage)}` : ""].filter(Boolean)
+                    if (sv.fullyInspected) parts.push(sv.fullyInspected === "Yes" ? "fully inspected" : sv.fullyInspected === "Partially" ? "partially inspected" : "not fully inspected")
+                    return parts.join(" · ") || undefined
+                  })())}
                   {isActive(3) && (
                     <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
                       <div>
@@ -6000,14 +6394,38 @@ export default function App() {
                         <FieldLabel text="STOP FOOTAGE *" />
                         <FootageRow footage={step3Form.stopFootage} onChange={v => setStep3Form(f => ({ ...f, stopFootage: v }))} />
                       </div>
+                      <div style={{ borderTop: `1px solid ${C.border}`, margin: "2px 0" }} />
+                      <div>
+                        <FieldLabel text="WAS THE PIPE FULLY INSPECTED? *" />
+                        <div style={{ display: "flex", gap: 6 }}>
+                          {(["Yes","Partially","No"] as const).map(v => (
+                            <button key={v} onClick={() => setStep3Form(f => ({ ...f, fullyInspected: v }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step3Form.fullyInspected === v ? (v === "Yes" ? "#E8F4EF" : v === "No" ? "#FEF2F2" : "#FFFBF0") : C.card, color: step3Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.muted, border: `1.5px solid ${step3Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.border}` }}>{v}</button>
+                          ))}
+                        </div>
+                      </div>
+                      {step3Form.fullyInspected && step3Form.fullyInspected !== "Yes" && (
+                        <>
+                          <div>
+                            <FieldLabel text="WHY NOT FULLY INSPECTED *" />
+                            <select value={step3Form.notFullyReason} onChange={e => setStep3Form(f => ({ ...f, notFullyReason: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
+                              <option value="">— select —</option>
+                              {NOT_FULLY_REASON_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <FieldLabel text="FOOTAGE ACTUALLY ASSESSABLE" />
+                            <FootageRow footage={step3Form.assessableFootage} onChange={v => setStep3Form(f => ({ ...f, assessableFootage: v }))} />
+                          </div>
+                        </>
+                      )}
                       <div>
                         <FieldLabel text="NOTES" />
                         <textarea value={step3Form.stopNotes} onChange={e => setStep3Form(f => ({ ...f, stopNotes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Any detail about what stopped the camera…" />
                       </div>
                       <button
-                        disabled={!step3Form.whyStopped || !step3Form.stopFootage}
-                        onClick={() => { updateVideo({ whyStopped: step3Form.whyStopped, stopFootage: step3Form.stopFootage, stopNotes: step3Form.stopNotes, inspStep: Math.max(step, 4) }); setEditingStep(null) }}
-                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step3Form.whyStopped && step3Form.stopFootage ? "#16202A" : C.card, color: step3Form.whyStopped && step3Form.stopFootage ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
+                        disabled={!step3Form.whyStopped || !step3Form.stopFootage || !step3Form.fullyInspected || (step3Form.fullyInspected !== "Yes" && !step3Form.notFullyReason)}
+                        onClick={() => { updateVideo({ whyStopped: step3Form.whyStopped, stopFootage: step3Form.stopFootage, fullyInspected: step3Form.fullyInspected as "Yes"|"Partially"|"No", notFullyReason: step3Form.notFullyReason, assessableFootage: step3Form.assessableFootage, stopNotes: step3Form.stopNotes, inspStep: Math.max(step, 4) }); setEditingStep(null) }}
+                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: (step3Form.whyStopped && step3Form.stopFootage && step3Form.fullyInspected && (step3Form.fullyInspected === "Yes" || step3Form.notFullyReason)) ? "#16202A" : C.card, color: (step3Form.whyStopped && step3Form.stopFootage && step3Form.fullyInspected && (step3Form.fullyInspected === "Yes" || step3Form.notFullyReason)) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
                       >
                         {editingStep === 3 ? "Save Changes" : "Next →"}
                       </button>
@@ -6038,9 +6456,50 @@ export default function App() {
 
                 {/* ── Step 5 — Sewer camera analysis ────────────────────────── */}
                 <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(5) ? 0.45 : 1 }}>
-                  {stepHdr(5, `${sv.observations.length} obs.${cippCount ? ` · ${cippCount} CIPP concern${cippCount !== 1 ? "s" : ""}` : ""}`)}
+                  {stepHdr(5, `${sv.observations.filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe").length} obs.${cippCount ? ` · ${cippCount} CIPP concern${cippCount !== 1 ? "s" : ""}` : ""}${hasStartOfPipe && hasEndOfPipe ? "" : " · start/end required"}`)}
                   {isActive(5) && (
                     <div>
+                      {/* START OF PIPE gate */}
+                      {!hasStartOfPipe ? (
+                        <div style={{ margin: "14px 16px", padding: "14px", borderRadius: 8, border: "1.5px solid #0369A1", background: "#EFF8FF" }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: "#0369A1", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>START OF PIPE — required before logging observations</div>
+                          <div style={{ fontSize: 10, color: "#1E4D7B", lineHeight: 1.5, marginBottom: 12 }}>Everything on this run is measured forward from here.</div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                            <div>
+                              <FieldLabel text="PIPE TYPE *" />
+                              <select value={startPipeForm.pipeType} onChange={e => setStartPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                <option value="">Select…</option>
+                                {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <FieldLabel text="PIPE SIZE *" />
+                              <select value={startPipeForm.pipeSize} onChange={e => setStartPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                <option value="">Select…</option>
+                                {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
+                              </select>
+                            </div>
+                          </div>
+                          <div style={{ marginBottom: 10 }}>
+                            <FieldLabel text="STILL AT 0 FT" />
+                            <button style={{ width: "100%", padding: "7px", fontSize: 10, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
+                          </div>
+                          <button
+                            disabled={!startPipeForm.pipeType || !startPipeForm.pipeSize}
+                            onClick={() => {
+                              const newObs: Observation = { id: `sop-${Date.now()}`, type: "start-of-pipe", footage: "0", pipeType: startPipeForm.pipeType, pipeSize: startPipeForm.pipeSize }
+                              updateVideo({ observations: [newObs, ...sv.observations.filter(o => o.type !== "start-of-pipe")] })
+                              setStartPipeSaved(sv.id)
+                            }}
+                            style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: startPipeForm.pipeType && startPipeForm.pipeSize ? "pointer" : "default", background: startPipeForm.pipeType && startPipeForm.pipeSize ? "#0369A1" : C.card, color: startPipeForm.pipeType && startPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
+                          >
+                            Save start of pipe
+                          </button>
+                        </div>
+                      ) : null}
+
+                      {/* Main observation UI — shown once start-of-pipe is saved */}
+                      {hasStartOfPipe && <>
                       <div style={{ padding: "10px 16px 8px", fontSize: 9.5, color: C.muted, lineHeight: 1.5, borderBottom: `1px solid ${C.border}` }}>Work through the recording and log what you see. Footage opens at the last observation — the camera only moves forward. Anything that affects lining is located here, while the camera is still at that footage.</div>
 
                       {/* Video player */}
@@ -6305,59 +6764,128 @@ export default function App() {
                 )}
 
                 {/* Observation log */}
-                <div style={{ padding: "0 16px 12px" }}>
+                {hasStartOfPipe && <div style={{ padding: "0 16px 12px" }}>
                   <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>LOGGED ON THIS RUN
                     {cippMissing > 0 && <span style={{ marginLeft: 8, padding: "1px 6px", background: "#FEF2F2", color: "#DC2626", borderRadius: 3, fontSize: 8.5, fontWeight: 700 }}>{cippMissing} CIPP concern{cippMissing !== 1 ? "s" : ""} still need a locate</span>}
                   </div>
-                  {sv.observations.length === 0 ? (
+                  {sv.observations.filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe").length === 0 ? (
                     <div style={{ fontSize: 11, color: C.dim, fontStyle: "italic" }}>Nothing logged yet.</div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                      {[...sv.observations].sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0")).map(obs => {
-                        const col = OBS_COLOR[obs.type]
-                        const chips: string[] = []
-                        if (obs.type === "tie-in") { if (obs.tieSubtype) chips.push(obs.tieSubtype); if (obs.tieSize) chips.push(obs.tieSize) }
-                        else if (obs.type === "defect") { if (obs.defectSubtype) chips.push(obs.defectSubtype); if (obs.severity) chips.push(SEV_LABEL[obs.severity]) }
-                        else if (obs.type === "excavation") { if (obs.depthBand) chips.push(obs.depthBand + " deep"); if (obs.surface) chips.push(obs.surface) }
-                        else if (obs.type === "direction-change") { if (obs.directionWhich) chips.push(obs.directionWhich); if (obs.directionFitting) chips.push(obs.directionFitting) }
-                        else if (obs.type === "pipe-transition") { if (obs.pipeSize) chips.push(obs.pipeSize); if (obs.pipeType) chips.push(obs.pipeType) }
-                        const cippBad = obs.cippConcern && (!obs.cippDepth || !obs.cippLocateClose || !obs.cippLocateWide)
-                        return (
-                          <div key={obs.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", borderRadius: 6, background: C.card, borderTop: `1px solid ${col}18`, borderRight: `1px solid ${col}18`, borderBottom: `1px solid ${col}18`, borderLeft: `3px solid ${col}` }}>
-                            <div style={{ flexShrink: 0, minWidth: 34, textAlign: "right" }}>
-                              <div style={{ fontSize: 11, fontFamily: "JetBrains Mono", fontWeight: 700, color: col }}>{fmtFtIn(obs.footage ?? "0")}</div>
-                              {obs.footageTo && <div style={{ fontSize: 8.5, color: C.dim }}>–{fmtFtIn(obs.footageTo)}</div>}
-                            </div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", marginBottom: 4 }}>
-                                <span style={{ fontSize: 8.5, fontWeight: 700, color: col, letterSpacing: "0.08em", textTransform: "uppercase" }}>{OBS_LABEL[obs.type]}</span>
-                                {obs.type === "defect" && obs.severity && <span style={{ padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700, background: SEV_COLOR[obs.severity] + "22", color: SEV_COLOR[obs.severity] }}>{SEV_LABEL[obs.severity]}</span>}
-                                {obs.cippConcern && <span style={{ padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700, background: cippBad ? "#FEF2F2" : "#FFF0F5", color: cippBad ? "#DC2626" : "#CE1A74" }}>{cippBad ? "⚠ CIPP — incomplete" : "CIPP concern"}</span>}
+                      {(() => {
+                        const sorted = [...sv.observations]
+                          .filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe")
+                          .sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
+                        return sorted.map(obs => {
+                          const col = OBS_COLOR[obs.type]
+                          const chips: string[] = []
+                          if (obs.type === "tie-in") { if (obs.tieSubtype) chips.push(obs.tieSubtype); if (obs.tieSize) chips.push(obs.tieSize) }
+                          else if (obs.type === "defect") { if (obs.defectSubtype) chips.push(obs.defectSubtype); if (obs.severity) chips.push(SEV_LABEL[obs.severity]) }
+                          else if (obs.type === "excavation") { if (obs.depthBand) chips.push(obs.depthBand + " deep"); if (obs.surface) chips.push(obs.surface) }
+                          else if (obs.type === "direction-change") { if (obs.directionWhich) chips.push(obs.directionWhich); if (obs.directionFitting) chips.push(obs.directionFitting) }
+                          else if (obs.type === "pipe-transition") { if (obs.pipeSize) chips.push(obs.pipeSize); if (obs.pipeType) chips.push(obs.pipeType) }
+                          const cippBad = obs.cippConcern && (!obs.cippDepth || !obs.cippLocateClose || !obs.cippLocateWide)
+                          return (
+                            <div key={obs.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", borderRadius: 6, background: C.card, borderTop: `1px solid ${col}18`, borderRight: `1px solid ${col}18`, borderBottom: `1px solid ${col}18`, borderLeft: `3px solid ${col}` }}>
+                              <div style={{ flexShrink: 0, minWidth: 34, textAlign: "right" }}>
+                                <div style={{ fontSize: 11, fontFamily: "JetBrains Mono", fontWeight: 700, color: col }}>{fmtFtIn(obs.footage ?? "0")}</div>
+                                {obs.footageTo && <div style={{ fontSize: 8.5, color: C.dim }}>–{fmtFtIn(obs.footageTo)}</div>}
                               </div>
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                                {chips.map((chip, i) => <span key={i} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: col + "12", color: col, fontFamily: "JetBrains Mono" }}>{chip}</span>)}
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", marginBottom: 4 }}>
+                                  <span style={{ fontSize: 8.5, fontWeight: 700, color: col, letterSpacing: "0.08em", textTransform: "uppercase" }}>{OBS_LABEL[obs.type]}</span>
+                                  {obs.type === "defect" && obs.severity && <span style={{ padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700, background: SEV_COLOR[obs.severity] + "22", color: SEV_COLOR[obs.severity] }}>{SEV_LABEL[obs.severity]}</span>}
+                                  {obs.cippConcern && <span style={{ padding: "1px 5px", borderRadius: 3, fontSize: 8, fontWeight: 700, background: cippBad ? "#FEF2F2" : "#FFF0F5", color: cippBad ? "#DC2626" : "#CE1A74" }}>{cippBad ? "⚠ CIPP — incomplete" : "CIPP concern"}</span>}
+                                </div>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                  {chips.map((chip, i) => <span key={i} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: col + "12", color: col, fontFamily: "JetBrains Mono" }}>{chip}</span>)}
+                                </div>
+                                {obs.notes && <div style={{ fontSize: 10, color: C.muted, marginTop: 4, lineHeight: 1.4 }}>{obs.notes}</div>}
                               </div>
-                              {obs.notes && <div style={{ fontSize: 10, color: C.muted, marginTop: 4, lineHeight: 1.4 }}>{obs.notes}</div>}
+                              <button onClick={() => deleteObservation(obs.id)} style={{ flexShrink: 0, padding: "2px 6px", fontSize: 9, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 3, cursor: "pointer", marginTop: 1 }}>✕</button>
                             </div>
-                            <button onClick={() => deleteObservation(obs.id)} style={{ flexShrink: 0, padding: "2px 6px", fontSize: 9, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 3, cursor: "pointer", marginTop: 1 }}>✕</button>
-                          </div>
-                        )
-                      })}
+                          )
+                        })
+                      })()}
                     </div>
                   )}
-                </div>
+                </div>}
+
+                {/* END OF PIPE gate */}
+                {hasStartOfPipe && (
+                  <div style={{ margin: "0 16px 12px", padding: "14px", borderRadius: 8, border: hasEndOfPipe ? "1.5px solid #00803E" : "1.5px solid #0369A1", background: hasEndOfPipe ? "#E8F4EF" : "#EFF8FF" }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: hasEndOfPipe ? "#00803E" : "#0369A1", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>
+                      {hasEndOfPipe ? "✓ END OF PIPE — saved" : "END OF PIPE — required to finish this step"}
+                    </div>
+                    {hasEndOfPipe ? (
+                      <div style={{ fontSize: 10, color: "#1A5C3A", lineHeight: 1.45 }}>
+                        {sv.observations.find(o => o.type === "end-of-pipe")?.pipeType} · {sv.observations.find(o => o.type === "end-of-pipe")?.pipeSize} at {sv.stopFootage ?? "—"} ft
+                        <button onClick={() => { updateVideo({ observations: sv.observations.filter(o => o.type !== "end-of-pipe") }); setEndPipeSaved(null) }} style={{ marginLeft: 8, fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer" }}>Edit</button>
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 10, color: "#1E4D7B", lineHeight: 1.5, marginBottom: 12 }}>What the pipe is at {sv.stopFootage ?? "—"} ft, where the camera stopped.</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                          <div>
+                            <FieldLabel text="PIPE TYPE *" />
+                            <select value={endPipeForm.pipeType} onChange={e => setEndPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                              <option value="">Select…</option>
+                              {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <FieldLabel text="PIPE SIZE *" />
+                            <select value={endPipeForm.pipeSize} onChange={e => setEndPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                              <option value="">Select…</option>
+                              {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                        <div style={{ marginBottom: 10 }}>
+                          <FieldLabel text={`STILL AT ${sv.stopFootage ?? "—"} FT`} />
+                          <button style={{ width: "100%", padding: "7px", fontSize: 10, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
+                        </div>
+                        <button
+                          disabled={!endPipeForm.pipeType || !endPipeForm.pipeSize}
+                          onClick={() => {
+                            const newObs: Observation = { id: `eop-${Date.now()}`, type: "end-of-pipe", footage: sv.stopFootage ?? "9999", pipeType: endPipeForm.pipeType, pipeSize: endPipeForm.pipeSize }
+                            updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe"), newObs] })
+                            setEndPipeSaved(sv.id)
+                          }}
+                          style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: endPipeForm.pipeType && endPipeForm.pipeSize ? "pointer" : "default", background: endPipeForm.pipeType && endPipeForm.pipeSize ? "#0369A1" : C.card, color: endPipeForm.pipeType && endPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
+                        >
+                          Save end of pipe
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+                </>}
 
                 {/* Step 5 footer */}
                 <div style={{ padding: "10px 16px 16px", borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 7 }}>
-                  <button onClick={() => setObsClosed(!sv.observationsClosed)} style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", borderRadius: 5, cursor: "pointer", background: sv.observationsClosed ? "transparent" : "#16202A", color: sv.observationsClosed ? C.muted : "#fff", border: sv.observationsClosed ? `1px solid ${C.border}` : "none" }}>
+                  {hasStartOfPipe && <button onClick={() => setObsClosed(!sv.observationsClosed)} style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", borderRadius: 5, cursor: "pointer", background: sv.observationsClosed ? "transparent" : "#16202A", color: sv.observationsClosed ? C.muted : "#fff", border: sv.observationsClosed ? `1px solid ${C.border}` : "none" }}>
                     {sv.observationsClosed ? "Back to observations" : "Done adding observations"}
-                  </button>
+                  </button>}
                   {cippMissing > 0 && sv.observationsClosed && (
                     <div style={{ padding: "7px 10px", borderRadius: 5, background: "#FEF2F2", border: "1px solid #FECACA", fontSize: 9.5, color: "#DC2626" }}>
                       {cippMissing} CIPP concern{cippMissing !== 1 ? "s" : ""} still need a depth and both locate images before you can continue.
                     </div>
                   )}
-                  <button disabled={!step5Complete} onClick={() => { if (step5Complete) { updateVideo({ inspStep: Math.max(step, 6) }); setEditingStep(null) } }} style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", borderRadius: 6, cursor: step5Complete ? "pointer" : "default", background: step5Complete ? "#00803E" : C.card, color: step5Complete ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}>
+                  {!hasStartOfPipe && <div style={{ fontSize: 10, color: C.dim, fontStyle: "italic", textAlign: "center" }}>Save Start of pipe above to begin logging observations.</div>}
+                  {hasStartOfPipe && !hasEndOfPipe && sv.observationsClosed && <div style={{ fontSize: 10, color: "#0369A1" }}>Save End of pipe above to continue.</div>}
+                  <button disabled={!step5Complete} onClick={() => {
+                    if (!step5Complete) return
+                    // Check for start/end mismatch
+                    const sopObs = sv.observations.find(o => o.type === "start-of-pipe")
+                    const eopObs = sv.observations.find(o => o.type === "end-of-pipe")
+                    const hasTrans = sv.observations.some(o => o.type === "pipe-transition")
+                    if (sopObs && eopObs && !hasTrans && (sopObs.pipeType !== eopObs.pipeType || sopObs.pipeSize !== eopObs.pipeSize)) {
+                      setObsStepMismatch({ startType: sopObs.pipeType ?? "", startSize: sopObs.pipeSize ?? "", endType: eopObs.pipeType ?? "", endSize: eopObs.pipeSize ?? "", stopFt: sv.stopFootage ?? "—" })
+                      return
+                    }
+                    updateVideo({ inspStep: Math.max(step, 6) }); setEditingStep(null)
+                  }} style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", borderRadius: 6, cursor: step5Complete ? "pointer" : "default", background: step5Complete ? "#00803E" : C.card, color: step5Complete ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}>
                     Continue to Step 6 →
                   </button>
                 </div>
@@ -6365,50 +6893,10 @@ export default function App() {
           )}
         </div>
 
-                {/* ── Step 6 — Was the pipe fully inspected? ─────────────────── */}
-                <div style={{ borderBottom: `1px solid ${C.border}`, opacity: isLocked(6) ? 0.45 : 1 }}>
-                  {stepHdr(6, sv.fullyInspected ? [sv.fullyInspected, sv.notFullyReason].filter(Boolean).join(" — ") : undefined)}
+                {/* ── Step 6 — Characteristics ──────────────────────────────── */}
+                <div style={{ opacity: isLocked(6) ? 0.45 : 1 }}>
+                  {stepHdr(6, sv.characteristics ? `${sv.characteristics.length} change point${sv.characteristics.length !== 1 ? "s" : ""}` : undefined)}
                   {isActive(6) && (
-                    <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
-                      <div style={{ fontSize: 9.5, color: C.muted, fontStyle: "italic", lineHeight: 1.4 }}>A separate judgement from why the camera stopped. A camera can reach the city main and still show nothing useable for forty feet because the line was full of grease.</div>
-                      <div>
-                        <FieldLabel text="WAS THE PIPE FULLY INSPECTED? *" />
-                        <div style={{ display: "flex", gap: 6 }}>
-                          {(["Yes","Partially","No"] as const).map(v => (
-                            <button key={v} onClick={() => setStep6Form(f => ({ ...f, fullyInspected: v }))} style={{ flex: 1, padding: "7px", fontSize: 11, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: step6Form.fullyInspected === v ? (v === "Yes" ? "#E8F4EF" : v === "No" ? "#FEF2F2" : "#FFFBF0") : C.card, color: step6Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.muted, border: `1.5px solid ${step6Form.fullyInspected === v ? (v === "Yes" ? "#00803E" : v === "No" ? "#DC2626" : "#A96B00") : C.border}` }}>{v}</button>
-                          ))}
-                        </div>
-                      </div>
-                      {step6Form.fullyInspected && step6Form.fullyInspected !== "Yes" && (
-                        <>
-                          <div>
-                            <FieldLabel text="WHY NOT FULLY INSPECTED *" />
-                            <select value={step6Form.notFullyReason} onChange={e => setStep6Form(f => ({ ...f, notFullyReason: e.target.value }))} style={{ ...inputSt, paddingRight: 8 }}>
-                              <option value="">— select —</option>
-                              {NOT_FULLY_REASON_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-                            </select>
-                          </div>
-                          <div>
-                            <FieldLabel text="FOOTAGE ACTUALLY ASSESSABLE" />
-                            <FootageRow footage={step6Form.assessableFootage} onChange={v => setStep6Form(f => ({ ...f, assessableFootage: v }))} />
-                          </div>
-                        </>
-                      )}
-                      <button
-                        disabled={!step6Form.fullyInspected || (step6Form.fullyInspected !== "Yes" && !step6Form.notFullyReason)}
-                        onClick={() => { updateVideo({ fullyInspected: step6Form.fullyInspected as "Yes"|"Partially"|"No", notFullyReason: step6Form.notFullyReason, assessableFootage: step6Form.assessableFootage, inspStep: Math.max(step, 7) }); setEditingStep(null) }}
-                        style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: "pointer", background: (step6Form.fullyInspected && (step6Form.fullyInspected === "Yes" || step6Form.notFullyReason)) ? "#16202A" : C.card, color: (step6Form.fullyInspected && (step6Form.fullyInspected === "Yes" || step6Form.notFullyReason)) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
-                      >
-                        {editingStep === 6 ? "Save Changes" : "Next →"}
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {/* ── Step 7 — Characteristics ──────────────────────────────── */}
-                <div style={{ opacity: isLocked(7) ? 0.45 : 1 }}>
-                  {stepHdr(7, sv.characteristics ? `${sv.characteristics.length} change point${sv.characteristics.length !== 1 ? "s" : ""}` : undefined)}
-                  {isActive(7) && (
                     <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
                       <div style={{ fontSize: 9.5, color: C.muted, lineHeight: 1.4 }}>A row is a change point. Add one whenever depth or what's above the ground changes — a new row copies the one above it, so you edit only what moved. Pipe material and size changes are logged as observations in step 5.</div>
                       {/* Characteristics table */}
@@ -6486,7 +6974,7 @@ export default function App() {
                       <button
                         disabled={step7Rows.some(r => !r.length || !r.depth || !r.aboveGround)}
                         onClick={() => {
-                          updateVideo({ characteristics: step7Rows, inspStep: 8 })
+                          updateVideo({ characteristics: step7Rows, inspStep: 7 })
                           setEditingStep(null)
                         }}
                         style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, borderRadius: 6, cursor: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "pointer" : "default", background: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "#00803E" : C.card, color: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
@@ -6495,7 +6983,7 @@ export default function App() {
                       </button>
                     </div>
                   )}
-                  {step >= 8 && !isActive(7) && (
+                  {step >= 7 && !isActive(6) && (
                     <div style={{ padding: "10px 16px 14px", textAlign: "center" }}>
                       <div style={{ padding: "10px 14px", borderRadius: 7, background: "#E8F4EF", border: "1px solid #00803E44", fontSize: 11, fontWeight: 700, color: "#00803E" }}>✓ Inspection complete</div>
                     </div>
@@ -7245,6 +7733,43 @@ export default function App() {
           </div>
         )
       })()}
+
+      {/* ── START/END MISMATCH DIALOG ────────────────────────────────────────────── */}
+      {obsStepMismatch && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ position: "absolute", inset: 0, background: "rgba(15,25,35,0.45)", backdropFilter: "blur(2px)" }} onClick={() => setObsStepMismatch(null)} />
+          <div style={{ position: "relative", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "20px", maxWidth: 380, width: "90%", boxShadow: "0 8px 32px rgba(0,0,0,0.18)" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#A96B00", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 14 }}>CAN'T FINISH THIS STEP</div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>The pipe changes but nothing was logged</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "12px", borderRadius: 7, background: C.bg, marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span style={{ color: C.muted }}>Start</span>
+                <span style={{ fontFamily: "JetBrains Mono", fontWeight: 700, color: C.text }}>{obsStepMismatch.startSize} {obsStepMismatch.startType} at 0 ft</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span style={{ color: C.muted }}>End</span>
+                <span style={{ fontFamily: "JetBrains Mono", fontWeight: 700, color: C.text }}>{obsStepMismatch.endSize} {obsStepMismatch.endType} at {obsStepMismatch.stopFt} ft</span>
+              </div>
+            </div>
+            <div style={{ fontSize: 10.5, color: C.text, lineHeight: 1.6, marginBottom: 14 }}>
+              A pipe can't change between those two points without a transition somewhere in between, and none was recorded.
+            </div>
+            <div style={{ padding: "10px 12px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, marginBottom: 16, fontSize: 10, color: C.muted, lineHeight: 1.6 }}>
+              <strong style={{ color: C.text }}>What to do:</strong><br />
+              • Scrub back through the recording and find where the material or size changes.<br />
+              • Log a Pipe transition observation at that footage.<br />
+              • If the start or end was entered wrong, edit it below.
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+              <button onClick={() => setObsStepMismatch(null)} style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, background: "#16202A", color: "#fff", border: "none", borderRadius: 5, cursor: "pointer" }}>Back to observations</button>
+              <div style={{ display: "flex", gap: 7 }}>
+                <button onClick={() => { setObsStepMismatch(null); if (selectedVideoId) { const vid = pipes.flatMap(p => p.videos).find(v => v.id === selectedVideoId); if (vid) { const sopObs = vid.observations.find(o => o.type === "start-of-pipe"); setStartPipeForm({ pipeType: sopObs?.pipeType ?? "", pipeSize: sopObs?.pipeSize ?? "" }); updateVideo({ observations: vid.observations.filter(o => o.type !== "start-of-pipe") }); setStartPipeSaved(null) } } }} style={{ flex: 1, padding: "7px", fontSize: 10, fontWeight: 600, background: C.card, color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Edit start</button>
+                <button onClick={() => { setObsStepMismatch(null); if (selectedVideoId) { const vid = pipes.flatMap(p => p.videos).find(v => v.id === selectedVideoId); if (vid) { const eopObs = vid.observations.find(o => o.type === "end-of-pipe"); setEndPipeForm({ pipeType: eopObs?.pipeType ?? "", pipeSize: eopObs?.pipeSize ?? "" }); updateVideo({ observations: vid.observations.filter(o => o.type !== "end-of-pipe") }); setEndPipeSaved(null) } } }} style={{ flex: 1, padding: "7px", fontSize: 10, fontWeight: 600, background: C.card, color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Edit end</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── CONFIRM DIALOG ───────────────────────────────────────────────────────── */}
       {confirmDialog && (
