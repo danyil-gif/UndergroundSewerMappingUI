@@ -79,6 +79,16 @@ interface RoutePoint {
   assetId?: string  // set when snapped to an asset
 }
 
+interface RouteVertex {
+  x: number
+  y: number
+  atFootage: number
+  observationIds: string[]
+  assetId?: string
+  offTarget?: boolean   // segment placed off the distance ring
+  isShaping?: boolean   // shaping point — no observations, interpolated footage
+}
+
 interface PipeEndpoint {
   type: string
   diameter: string
@@ -102,6 +112,7 @@ interface Pipe {
   toX?: number
   toY?: number
   waypoints: RoutePoint[]  // intermediate routing points
+  vertices?: RouteVertex[] // assisted-drawing vertices (replaces waypoints when present)
   geometryStatus?: "stub" | "drawn"
   length: string
   slope: string
@@ -629,6 +640,17 @@ const REACHED_REASONS = new Set([
   "Reached a 90° fitting — end of the pipe",
   "Reached a septic tank or lift station",
 ])
+function posAtFootage(ft: number, verts: RouteVertex[]): { x: number; y: number } | null {
+  for (let i = 1; i < verts.length; i++) {
+    const a = verts[i - 1], b = verts[i]
+    if (ft >= a.atFootage && ft <= b.atFootage) {
+      const t = b.atFootage === a.atFootage ? 0 : (ft - a.atFootage) / (b.atFootage - a.atFootage)
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+    }
+  }
+  return null
+}
+
 function fullLengthPrefill(reason: string): "Yes" | "No" | "" {
   if (REACHED_REASONS.has(reason)) return "Yes"
   if (reason === "Other" || !reason) return ""
@@ -1474,21 +1496,23 @@ export default function App() {
     changeViewOnly: boolean
   } | null>(null)
   const mapWrapRef = useRef<HTMLDivElement>(null)
-  const [mapImage, setMapImage] = useState<string | null>(null)
-  const [mapImageProps, setMapImageProps] = useState({ x: 10, y: 10, w: 60, h: 60, rotation: 0, opacity: 0.85 })
-  const [showMapMenu, setShowMapMenu] = useState(false)
-  const [editingMap, setEditingMap] = useState(false)
-  const [mapDrag, setMapDrag] = useState<{
-    type: "move" | "tl" | "tr" | "bl" | "br"
-    startMX: number; startMY: number
-    startProps: { x: number; y: number; w: number; h: number }
-  } | null>(null)
+  const msFileRef = useRef<HTMLInputElement>(null)
   const [mode, setMode] = useState<Mode>("view")
   const [addAssetType, setAddAssetType] = useState<AssetType>("catch-basin")
   const [drawFrom, setDrawFrom] = useState<string | null>(null)        // assetId start
   const [drawFromCoord, setDrawFromCoord] = useState<{ x: number; y: number; pipeId: string } | null>(null) // pipe-snap start
   const [drawPoints, setDrawPoints] = useState<RoutePoint[]>([])
   const [finishingStubId, setFinishingStubId] = useState<string | null>(null) // pipe id being finished from stub
+  const [drawPathPrompt, setDrawPathPrompt] = useState<{ pipeId: string; videoId: string } | null>(null)
+  const [assistedDraw, setAssistedDraw] = useState<{
+    pipeId: string
+    vertices: RouteVertex[]
+    placedObsIds: string[]
+    selection: string[]
+    addingShapingPt: boolean
+    cursorPos: { x: number; y: number } | null
+    unwindConfirm: { vertIdx: number; segCount: number; obsCount: number } | null
+  } | null>(null)
   const [hoverAssetId, setHoverAssetId] = useState<string | null>(null)
   const [drawMouse, setDrawMouse] = useState<{ x: number; y: number } | null>(null)
   const [drawHoverPtIdx, setDrawHoverPtIdx] = useState<number | null>(null) // index of drawPoint being hovered for removal
@@ -1609,7 +1633,6 @@ export default function App() {
   const [charRowEditing, setCharRowEditing] = useState<string | null>(null)
 
   const mapRef = useRef<HTMLDivElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // ── Map zoom/pan via wheel and touch ─────────────────────────────────────────
   useEffect(() => {
@@ -1680,14 +1703,6 @@ export default function App() {
     return () => document.removeEventListener("mousedown", handler)
   }, [showIconScaleDropdown])
 
-  // Escape to exit map editing mode
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && editingMap) { setEditingMap(false); setMapDrag(null) }
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [editingMap])
 
   // Refs so the zoom effect always reads fresh data without them being deps
   const mapViewsRef = useRef(mapViews)
@@ -1803,7 +1818,6 @@ export default function App() {
   }
 
   const handleMapMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (mapDrag || editingMap) return
     // Middle mouse or plain left-click drag → pan (always available)
     if (e.button === 1 || (e.button === 0 && (mode === "view" || e.altKey))) {
       e.preventDefault()
@@ -1816,7 +1830,7 @@ export default function App() {
     const { x, y } = toContentCoords(e.clientX, e.clientY)
     setSelectStart({ x, y })
     setSelectCurrent({ x, y })
-  }, [mode, toContentCoords, mapPan, mapDrag, editingMap, mapZoom])
+  }, [mode, toContentCoords, mapPan, mapZoom])
 
   const completePipe = useCallback(() => {
     const hasStart = drawFrom || drawFromCoord
@@ -1904,6 +1918,34 @@ export default function App() {
   }, [drawFrom, drawFromCoord, drawPoints, pipes, finishDrawingPipeId])
 
   const handleMapClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (assistedDraw) {
+      const { x, y } = toContentCoords(e.clientX, e.clientY)
+      assistedDraw && (() => {
+        const ad = assistedDraw
+        const allObsLocal = pipes.find(p => p.id === ad.pipeId)?.videos.find(v => (v.inspStep || 1) >= 7)?.observations ?? []
+        const sortedObs = [...allObsLocal].sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
+        const lastV = ad.vertices[ad.vertices.length - 1]
+        const lastSel = ad.selection.length > 0 ? sortedObs.find(o => o.id === ad.selection[ad.selection.length - 1]) : null
+        const targetFtLocal = lastSel ? parseFloat(lastSel.footage || "0") - lastV.atFootage : 0
+        const pctPerFtLocal = siteMap ? 100 / (siteMap.scale * siteMap.imageW * siteMap.viewRect.w) : 0
+        const rr = targetFtLocal > 0 && pctPerFtLocal > 0 ? targetFtLocal * pctPerFtLocal : 0
+        const projectRing = (cx: number, cy: number, px: number, py: number, r: number) => {
+          const dx = px - cx, dy = py - cy; const d = Math.hypot(dx, dy); if (d === 0) return { x: cx, y: cy - r }
+          return { x: cx + (dx / d) * r, y: cy + (dy / d) * r }
+        }
+        if (ad.addingShapingPt) {
+          setAssistedDraw(s => s ? { ...s, vertices: [...s.vertices, { x, y, atFootage: lastV.atFootage, observationIds: [], isShaping: true }], addingShapingPt: false } : null)
+          return
+        }
+        if (ad.selection.length === 0) return
+        let fx = x, fy = y, offTarget = false
+        if (!e.shiftKey && rr > 0) { const sn = projectRing(lastV.x, lastV.y, x, y, rr); fx = sn.x; fy = sn.y } else if (e.shiftKey) { offTarget = true }
+        const selObs = sortedObs.find(o => o.id === ad.selection[ad.selection.length - 1])
+        const newFt = selObs ? parseFloat(selObs.footage || "0") : lastV.atFootage
+        setAssistedDraw(s => s ? { ...s, vertices: [...s.vertices, { x: fx, y: fy, atFootage: newFt, observationIds: [...ad.selection], offTarget }], placedObsIds: [...s.placedObsIds, ...ad.selection], selection: [], cursorPos: null } : null)
+      })()
+      return
+    }
     if (dragId || mode === "select-area") return
     if (!mapRef.current) return
     const drawStarted = drawFrom || drawFromCoord
@@ -1935,7 +1977,7 @@ export default function App() {
         setDrawPoints(prev => [...prev, { x, y }])
       }
     }
-  }, [mode, addAssetType, assets, dragId, drawFrom, drawFromCoord, drawHoverPtIdx, completePipe, toContentCoords])
+  }, [assistedDraw, mode, addAssetType, assets, dragId, drawFrom, drawFromCoord, drawHoverPtIdx, completePipe, toContentCoords, pipes, siteMap])
 
   const handleAssetClick = useCallback((assetId: string) => {
     if (mode === "draw-pipe") {
@@ -1973,23 +2015,9 @@ export default function App() {
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!mapRef.current) return
-    if (mapDrag) {
-      // Delta in screen px → canvas % (canvas is 4000px = 100%, 1% = 40px)
-      const dxPct = (e.clientX - mapDrag.startMX) / (mapZoom * 40)
-      const dyPct = (e.clientY - mapDrag.startMY) / (mapZoom * 40)
-      const sp = mapDrag.startProps
-      setMapImageProps(prev => {
-        let { x, y, w, h } = sp
-        switch (mapDrag.type) {
-          case "move": x = sp.x + dxPct; y = sp.y + dyPct; break
-          case "tl":   x = sp.x + dxPct; y = sp.y + dyPct; w = Math.max(5, sp.w - dxPct); h = Math.max(5, sp.h - dyPct); break
-          case "tr":   y = sp.y + dyPct; w = Math.max(5, sp.w + dxPct); h = Math.max(5, sp.h - dyPct); break
-          case "bl":   x = sp.x + dxPct; w = Math.max(5, sp.w - dxPct); h = Math.max(5, sp.h + dyPct); break
-          case "br":   w = Math.max(5, sp.w + dxPct); h = Math.max(5, sp.h + dyPct); break
-        }
-        return { ...prev, x, y, w, h }
-      })
-      return
+    if (assistedDraw) {
+      const { x, y } = toContentCoords(e.clientX, e.clientY)
+      setAssistedDraw(s => s ? { ...s, cursorPos: { x, y } } : null)
     }
     if (isPanning) {
       const rect = mapRef.current.getBoundingClientRect()
@@ -2018,10 +2046,9 @@ export default function App() {
       }
       setDrawHoverPtIdx(found)
     }
-  }, [dragId, selectStart, toContentCoords, mode, drawFrom, drawFromCoord, drawPoints, isPanning, panStart, mapDrag, mapZoom])
+  }, [assistedDraw, dragId, selectStart, toContentCoords, mode, drawFrom, drawFromCoord, drawPoints, isPanning, panStart, mapZoom])
 
   const handleMouseUp = useCallback(() => {
-    setMapDrag(null)
     setIsPanning(false)
     setDragId(null)
     if (selectStart && selectCurrent) {
@@ -2037,7 +2064,7 @@ export default function App() {
       setSelectStart(null)
       setSelectCurrent(null)
     }
-  }, [selectStart, selectCurrent, mapViews, mapDrag])
+  }, [selectStart, selectCurrent, mapViews])
 
   // ── Data mutations ───────────────────────────────────────────────────────────
 
@@ -2198,30 +2225,6 @@ export default function App() {
     if (closed) setCaptureStep("none")
   }
 
-  const handleMapUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = ev => {
-      const src = ev.target?.result as string
-      setMapImage(src)
-      // Detect natural image dimensions to size it without stretching
-      const img = new Image()
-      img.onload = () => {
-        const CANVAS = 4000
-        const maxW = 60  // max % of canvas width
-        const aspect = img.naturalWidth / img.naturalHeight
-        const w = maxW
-        const h = (w / aspect) * (CANVAS / CANVAS) // stays in % since canvas is square-ish
-        const x = (100 - w) / 2
-        const y = (100 - h) / 2
-        setMapImageProps({ x, y, w, h: w / aspect, rotation: 0, opacity: 0.85 })
-      }
-      img.src = src
-    }
-    reader.readAsDataURL(file)
-    e.target.value = ""
-  }
 
   // ── Select helpers ───────────────────────────────────────────────────────────
 
@@ -3249,8 +3252,6 @@ export default function App() {
             </>
           )}
         </Section>
-        <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleMapUpload} />
-
         {/* Add infrastructure */}
         <Section style={{ paddingBottom: leftSectionOpen.infra ? undefined : 0 }}>
           <button
@@ -3311,6 +3312,7 @@ export default function App() {
             </>
           )}
         </Section>
+        <div style={{ height: 12 }} />
 
         {/* Assets + Pipes list (combined) */}
         <div style={{ borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0, flex: leftSectionOpen.assets ? 1 : undefined }}>
@@ -3561,7 +3563,7 @@ export default function App() {
                 </svg>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 11, fontWeight: 600, color: sel ? C.cyan : C.muted }}>
-                    {mapImage ? "Site Plan" : "Main Map"}
+                    {siteMap ? "Site Plan" : "Main Map"}
                   </div>
                   <div style={{ fontSize: 9, color: C.dim }}>{assets.filter(a=>!a.archived).length} assets · default</div>
                 </div>
@@ -3612,8 +3614,7 @@ export default function App() {
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <div style={{ width: 6, height: 6, borderRadius: "50%", background: mode === "view" ? C.dim : mode === "draw-pipe" ? C.blue : C.cyan, transition: "background 0.2s" }} />
             <span style={{ fontSize: 10, color: C.muted, fontFamily: "JetBrains Mono" }}>
-              {editingMap && <span style={{ fontSize: 9.5, color: C.cyan, fontWeight: 700, letterSpacing: "0.06em" }}>SITE PLAN — drag to move · drag corners to resize · press Esc to finish</span>}
-              {!editingMap && mode === "view" && "VIEW — select asset or pipe"}
+              {mode === "view" && "VIEW — select asset or pipe"}
               {mode === "add-asset" && `PLACE — click to add ${addAssetType}`}
               {mode === "draw-pipe" && !(drawFrom || drawFromCoord) && "DRAW — click an asset or existing pipe to start the route"}
               {mode === "draw-pipe" && (drawFrom || drawFromCoord) && (() => {
@@ -3648,84 +3649,9 @@ export default function App() {
             </div>
           )}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-            {/* Map image controls */}
-            {mapImage && (
-              <div style={{ position: "relative" }}>
-                <button
-                  onClick={() => setShowMapMenu(v => !v)}
-                  style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", fontSize: 10, fontWeight: 600, background: showMapMenu || editingMap ? C.cyan : C.card, color: showMapMenu || editingMap ? "#fff" : C.muted, border: `1px solid ${showMapMenu || editingMap ? C.cyan : C.border}`, borderRadius: 5, cursor: "pointer", letterSpacing: "0.04em" }}
-                >
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                    <rect x="1" y="1" width="10" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
-                    <path d="M1 5h10M5 1v10" stroke="currentColor" strokeWidth="0.8" opacity="0.5" />
-                  </svg>
-                  Site Plan
-                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" style={{ opacity: 0.6 }}>
-                    <path d="M1 2.5l3 3 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                  </svg>
-                </button>
-                {showMapMenu && (
-                  <div onMouseDown={e => e.stopPropagation()} style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 100, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.10)", padding: "14px 16px", minWidth: 240, display: "flex", flexDirection: "column", gap: 12 }}>
-
-                    <div style={{ fontSize: 9, fontWeight: 700, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase" }}>SITE PLAN</div>
-
-                    {/* Move / Resize toggle */}
-                    <button
-                      onClick={() => { setEditingMap(v => !v); setShowMapMenu(false) }}
-                      style={{ width: "100%", padding: "7px 10px", fontSize: 10.5, fontWeight: 600, background: editingMap ? C.cyan : C.panel, color: editingMap ? "#fff" : C.text, border: `1px solid ${editingMap ? C.cyan : C.border}`, borderRadius: 5, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                        <path d="M6 1v10M1 6h10M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" opacity="0.7" />
-                      </svg>
-                      {editingMap ? "Stop editing (drag to move/resize)" : "Move & Resize (drag corners)"}
-                    </button>
-
-                    {/* Opacity */}
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                        <span style={{ fontSize: 10.5, color: C.text, fontWeight: 500 }}>Opacity</span>
-                        <span style={{ fontFamily: "JetBrains Mono", fontSize: 9.5, color: C.muted }}>{Math.round(mapImageProps.opacity * 100)}%</span>
-                      </div>
-                      <input type="range" min="0.05" max="1" step="0.05" value={mapImageProps.opacity}
-                        onChange={e => setMapImageProps(p => ({ ...p, opacity: Number(e.target.value) }))}
-                        style={{ width: "100%", accentColor: C.cyan, cursor: "pointer" }}
-                      />
-                    </div>
-
-                    {/* Rotation */}
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                        <span style={{ fontSize: 10.5, color: C.text, fontWeight: 500 }}>Rotation</span>
-                        <span style={{ fontFamily: "JetBrains Mono", fontSize: 9.5, color: C.muted }}>{mapImageProps.rotation}°</span>
-                      </div>
-                      <input type="range" min="-180" max="180" step="1" value={mapImageProps.rotation}
-                        onChange={e => setMapImageProps(p => ({ ...p, rotation: Number(e.target.value) }))}
-                        style={{ width: "100%", accentColor: C.cyan, cursor: "pointer" }}
-                      />
-                      <button onClick={() => setMapImageProps(p => ({ ...p, rotation: 0 }))} style={{ marginTop: 4, fontSize: 9, color: C.muted, background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", cursor: "pointer", padding: 0, textDecoration: "underline" }}>Reset rotation</button>
-                    </div>
-
-                    {/* Reset position */}
-                    <button onClick={() => setMapImageProps({ x: 10, y: 10, w: 80, h: 80, rotation: 0, opacity: 0.85 })}
-                      style={{ width: "100%", padding: "6px", fontSize: 9.5, background: C.panel, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer" }}>
-                      Reset to full canvas
-                    </button>
-
-                    <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-                      {/* Replace */}
-                      <button onClick={() => { fileInputRef.current?.click(); setShowMapMenu(false) }}
-                        style={{ width: "100%", padding: "6px", fontSize: 9.5, background: C.panel, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer" }}>
-                        Replace image…
-                      </button>
-                      {/* Remove */}
-                      <button onClick={() => { setMapImage(null); setShowMapMenu(false); setEditingMap(false) }}
-                        style={{ width: "100%", padding: "6px", fontSize: 9.5, background: "#FEF2F2", color: "#DC2626", border: `1px solid #FECACA`, borderRadius: 4, cursor: "pointer" }}>
-                        Remove map
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
+            {/* Scale readout */}
+            {siteMap && (
+              <span style={{ fontFamily: "JetBrains Mono", fontSize: 9.5, color: C.dim }}>{siteMap.scale.toFixed(3)} ft/px</span>
             )}
             {/* Icon size dropdown */}
             <div style={{ position: "relative" }}>
@@ -3913,7 +3839,7 @@ export default function App() {
                   <rect x="1" y="1" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
                   <path d="M1 5h11" stroke="currentColor" strokeWidth="1" opacity="0.5" />
                 </svg>
-                {mapImage ? "Site Plan" : "Main Map"}
+                {siteMap ? "Site Plan" : "Main Map"}
               </button>
             )
           })()}
@@ -4025,80 +3951,50 @@ export default function App() {
             background: "#EEF3F8",
             boxShadow: "0 0 0 1px #D2DAE2, 0 8px 40px rgba(0,0,0,0.08)",
           }}>
-          {/* Map image — inside zoom so it moves with assets/pipes */}
-          {mapImage && (() => {
-            const mp = mapImageProps
-            const cornerSt = (cursor: string): React.CSSProperties => ({
-              position: "absolute", width: 14, height: 14,
-              background: C.cyan, borderTop: `2px solid #fff`, borderRight: `2px solid #fff`, borderBottom: `2px solid #fff`, borderLeft: `2px solid #fff`,
-              borderRadius: 3, cursor, zIndex: 5,
-            })
-            return (
-              <div
+          {/* Site map image — rendered beneath assets, pipes and overlays */}
+          {siteMap ? (
+            <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
+              <img
+                src={siteMap.sourceUrl}
+                alt=""
+                draggable={false}
                 style={{
                   position: "absolute",
-                  left: `${mp.x}%`, top: `${mp.y}%`,
-                  width: `${mp.w}%`, height: `${mp.h}%`,
-                  transform: `rotate(${mp.rotation}deg)`,
-                  transformOrigin: "center center",
-                  opacity: mp.opacity,
-                  cursor: editingMap ? "move" : "default",
-                  zIndex: 0,
-                  outline: editingMap ? `2px dashed ${C.cyan}` : undefined,
-                  outlineOffset: editingMap ? 3 : undefined,
+                  width: `${100 / siteMap.viewRect.w}%`,
+                  height: `${100 / siteMap.viewRect.h}%`,
+                  left: `${-(siteMap.viewRect.x / siteMap.viewRect.w) * 100}%`,
+                  top: `${-(siteMap.viewRect.y / siteMap.viewRect.h) * 100}%`,
+                  userSelect: "none",
+                  pointerEvents: "none",
                 }}
-                onMouseDown={editingMap ? e => {
-                  e.stopPropagation()
-                  setMapDrag({ type: "move", startMX: e.clientX, startMY: e.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } })
-                } : undefined}
-                onTouchStart={editingMap ? e => {
-                  e.stopPropagation()
-                  const t = e.touches[0]
-                  setMapDrag({ type: "move", startMX: t.clientX, startMY: t.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } })
-                } : undefined}
-              >
-                <img src={mapImage} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", userSelect: "none", pointerEvents: "none" }} draggable={false} />
-                {editingMap && (
-                  <>
-                    {/* TL */ }
-                    <div style={{ ...cornerSt("nwse-resize"), top: -7, left: -7 }}
-                      onMouseDown={e => { e.stopPropagation(); setMapDrag({ type: "tl", startMX: e.clientX, startMY: e.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } }) }}
-                      onTouchStart={e => { e.stopPropagation(); const t = e.touches[0]; setMapDrag({ type: "tl", startMX: t.clientX, startMY: t.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } }) }} />
-                    {/* TR */ }
-                    <div style={{ ...cornerSt("nesw-resize"), top: -7, right: -7 }}
-                      onMouseDown={e => { e.stopPropagation(); setMapDrag({ type: "tr", startMX: e.clientX, startMY: e.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } }) }}
-                      onTouchStart={e => { e.stopPropagation(); const t = e.touches[0]; setMapDrag({ type: "tr", startMX: t.clientX, startMY: t.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } }) }} />
-                    {/* BL */ }
-                    <div style={{ ...cornerSt("nesw-resize"), bottom: -7, left: -7 }}
-                      onMouseDown={e => { e.stopPropagation(); setMapDrag({ type: "bl", startMX: e.clientX, startMY: e.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } }) }}
-                      onTouchStart={e => { e.stopPropagation(); const t = e.touches[0]; setMapDrag({ type: "bl", startMX: t.clientX, startMY: t.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } }) }} />
-                    {/* BR */ }
-                    <div style={{ ...cornerSt("nwse-resize"), bottom: -7, right: -7 }}
-                      onMouseDown={e => { e.stopPropagation(); setMapDrag({ type: "br", startMX: e.clientX, startMY: e.clientY, startProps: { x: mp.x, y: mp.y, w: mp.w, h: mp.h } }) }}
-                      onTouchStart={e => { e.stopPropagation(); const t = e.touches[0]; setMapDrag({ type: "br", startMX: t.clientX, startMY: t.clientY, startProps: { x: mp.x, y: mp.y, w: mp.h, h: mp.h } }) }} />
-                  </>
-                )}
+              />
+            </div>
+          ) : (
+            <>
+              <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}>
+                <defs>
+                  <pattern id="sg" width="24" height="24" patternUnits="userSpaceOnUse">
+                    <path d="M 24 0 L 0 0 0 24" fill="none" stroke={C.cyan} strokeWidth="0.25" opacity="0.2" />
+                  </pattern>
+                  <pattern id="bg" width="120" height="120" patternUnits="userSpaceOnUse">
+                    <rect width="120" height="120" fill="url(#sg)" />
+                    <path d="M 120 0 L 0 0 0 120" fill="none" stroke={C.cyan} strokeWidth="0.6" opacity="0.12" />
+                  </pattern>
+                </defs>
+                <rect width="100%" height="100%" fill="#EEF3F8" />
+                <rect width="100%" height="100%" fill="url(#bg)" />
+                <rect x="8%" y="8%" width="84%" height="84%" fill="none" stroke={C.cyan} strokeWidth="0.7" strokeDasharray="12 6" opacity="0.45" />
+              </svg>
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, pointerEvents: "none" }}>
+                <span style={{ fontSize: 12, color: C.muted, fontStyle: "italic" }}>No map yet.</span>
+                <button
+                  onClick={() => setMapSetup({ img:null, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })}
+                  style={{ pointerEvents: "all", padding: "6px 16px", fontSize: 11, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 5, cursor: "pointer" }}
+                >
+                  Add a map
+                </button>
               </div>
-            )
-          })()}
-          {/* Grid */}
-          {!mapImage && (
-            <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}>
-              <defs>
-                <pattern id="sg" width="24" height="24" patternUnits="userSpaceOnUse">
-                  <path d="M 24 0 L 0 0 0 24" fill="none" stroke={C.cyan} strokeWidth="0.25" opacity="0.2" />
-                </pattern>
-                <pattern id="bg" width="120" height="120" patternUnits="userSpaceOnUse">
-                  <rect width="120" height="120" fill="url(#sg)" />
-                  <path d="M 120 0 L 0 0 0 120" fill="none" stroke={C.cyan} strokeWidth="0.6" opacity="0.12" />
-                </pattern>
-              </defs>
-              <rect width="100%" height="100%" fill="#EEF3F8" />
-              <rect width="100%" height="100%" fill="url(#bg)" />
-              {/* Property boundary */}
-              <rect x="8%" y="8%" width="84%" height="84%" fill="none" stroke={C.cyan} strokeWidth="0.7" strokeDasharray="12 6" opacity="0.45" />
-              <text x="50%" y="94%" textAnchor="middle" fill={C.muted} fontSize="10" fontFamily="JetBrains Mono" opacity="0.8">PROPERTY BOUNDARY — upload site plan to replace grid</text>
-            </svg>
+            </>
           )}
 
           {/* SVG pipe overlay */}
@@ -4142,11 +4038,9 @@ export default function App() {
               const lineColor = outOfView ? "#C8D4DE" : sel ? "#000000" : hov ? "#333333" : hasVid ? "#1a1a1a" : "#9CA3AF"
 
               // Full ordered point list for rendering
-              const pts = [
-                { x: frX, y: frY },
-                ...(pipe.waypoints ?? []),
-                { x: toX, y: toY },
-              ]
+              const pts = pipe.vertices && pipe.vertices.length >= 2
+                ? pipe.vertices.map(v => ({ x: v.x, y: v.y }))
+                : [{ x: frX, y: frY }, ...(pipe.waypoints ?? []), { x: toX, y: toY }]
               // Midpoint of the whole route for label
               const midPt = pts[Math.floor(pts.length / 2)]
 
@@ -4244,6 +4138,20 @@ export default function App() {
                       <circle cx={`${midPt.x}%`} cy={`${midPt.y}%`} r="7" fill="#00803E" transform="translate(22, -16)" />
                       <text x={`${midPt.x}%`} y={`${midPt.y}%`} textAnchor="middle" dy="-12.5" dx="22" fontSize="8" fill="#fff" fontFamily="JetBrains Mono" fontWeight="700">✓</text>
                     </g>
+                  )}
+                  {/* CIPP concern markers — only when pipe has vertices (assisted drawn) */}
+                  {pipe.vertices && pipe.vertices.length >= 2 && pipe.videos.flatMap(v =>
+                    v.observations.filter(o => o.cippConcern).map(o => {
+                      const ft = parseFloat(o.footage || "0")
+                      const pos = posAtFootage(ft, pipe.vertices!)
+                      if (!pos) return null
+                      return (
+                        <g key={o.id} style={{ pointerEvents: "none" }}>
+                          <circle cx={`${pos.x}%`} cy={`${pos.y}%`} r="5" fill="#CE1A74" stroke={C.panel} strokeWidth="1.2" />
+                          <text x={`${pos.x}%`} y={`${pos.y}%`} dy="-8" textAnchor="middle" fontSize="7.5" fill="#CE1A74" fontFamily="JetBrains Mono" fontWeight="700">{Math.round(ft)}ft</text>
+                        </g>
+                      )
+                    })
                   )}
                 </g>
               )
@@ -5900,19 +5808,35 @@ export default function App() {
               <div style={{ margin: "0 16px 0", padding: "10px 12px", borderRadius: 7, background: "#FFFBF0", border: "1px solid #F59E0B66", display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, color: "#A96B00", letterSpacing: "0.06em", textTransform: "uppercase" }}>⚠ Path not drawn</div>
                 <div style={{ fontSize: 10, color: "#92400E", lineHeight: 1.45 }}>Finish the drawing once you know where it runs.</div>
-                <button
-                  onClick={() => {
-                    setFinishDrawingPipeId(selectedPipe.id)
-                    setMode("draw-pipe")
-                    const fr = assets.find(a => a.id === selectedPipe.fromId)
-                    if (fr) setDrawFrom(selectedPipe.fromId)
-                    setDrawPoints([{ x: selectedPipe.toX ?? (fr?.x ?? 0), y: selectedPipe.toY ?? (fr?.y ?? 0) }])
-                    setSelectedPipeId(null)
-                  }}
-                  style={{ alignSelf: "flex-start", padding: "5px 12px", fontSize: 10, fontWeight: 700, background: "#A96B00", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
-                >
-                  Finish drawing
-                </button>
+                {(() => {
+                  const hasInspection = selectedPipe.videos.some(v => (v.inspStep || 1) >= 7)
+                  if (hasInspection) {
+                    const vid = selectedPipe.videos.find(v => (v.inspStep || 1) >= 7)
+                    return (
+                      <button
+                        onClick={() => setDrawPathPrompt({ pipeId: selectedPipe.id, videoId: vid!.id })}
+                        style={{ alignSelf: "flex-start", padding: "5px 12px", fontSize: 10, fontWeight: 700, background: "#A96B00", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
+                      >
+                        Draw the path
+                      </button>
+                    )
+                  }
+                  return (
+                    <button
+                      onClick={() => {
+                        setFinishDrawingPipeId(selectedPipe.id)
+                        setMode("draw-pipe")
+                        const fr = assets.find(a => a.id === selectedPipe.fromId)
+                        if (fr) setDrawFrom(selectedPipe.fromId)
+                        setDrawPoints([{ x: selectedPipe.toX ?? (fr?.x ?? 0), y: selectedPipe.toY ?? (fr?.y ?? 0) }])
+                        setSelectedPipeId(null)
+                      }}
+                      style={{ alignSelf: "flex-start", padding: "5px 12px", fontSize: 10, fontWeight: 700, background: "#A96B00", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
+                    >
+                      Finish drawing
+                    </button>
+                  )
+                })()}
               </div>
             )}
 
@@ -7234,6 +7158,11 @@ export default function App() {
                         onClick={() => {
                           updateVideo({ characteristics: step7Rows, inspStep: 7 })
                           setEditingStep(null)
+                          // Prompt to draw the path if this pipe has no vertices yet
+                          const thisPipe = pipes.find(p => p.videos.some(v => v.id === sv.id))
+                          if (thisPipe && !thisPipe.vertices?.length && thisPipe.geometryStatus !== "drawn") {
+                            setDrawPathPrompt({ pipeId: thisPipe.id, videoId: sv.id })
+                          }
                         }}
                         style={{ width: "100%", padding: "10px", fontSize: 11, fontWeight: 700, borderRadius: 6, cursor: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "pointer" : "default", background: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "#00803E" : C.card, color: step7Rows.every(r => r.length || r.isStart) && step7Rows.every(r => r.depth) && step7Rows.every(r => r.aboveGround) ? "#fff" : C.dim, borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none" }}
                       >
@@ -8236,6 +8165,8 @@ export default function App() {
             }}
             onMouseUp={() => setMapSetup(s => s ? { ...s, msDrag: null } : null)}>
 
+            <input ref={msFileRef} type="file" accept="image/*" style={{ display:"none" }} onChange={e => { const f = e.target.files?.[0]; if (f) msUpload(f); e.target.value = "" }} />
+
             {/* Title bar */}
             <div style={{ height:46, borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", padding:"0 16px", gap:12, flexShrink:0 }}>
               <span style={{ fontWeight:700, fontSize:14 }}>Set up the map</span>
@@ -8249,7 +8180,7 @@ export default function App() {
               {/* Image area */}
               <div style={{ flex:1, padding:20, display:"flex", alignItems:"center", justifyContent:"center", overflow:"auto", background:"#0B0F13" }}>
                 {!ms.img ? (
-                  <div onClick={() => { const inp = document.createElement("input"); inp.type="file"; inp.accept="image/*"; inp.onchange = (ev: Event) => { const f = (ev.target as HTMLInputElement).files?.[0]; if (f) msUpload(f) }; inp.click() }}
+                  <div onClick={() => msFileRef.current?.click()}
                     onDragOver={e => e.preventDefault()}
                     onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) msUpload(f) }}
                     style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:60, textAlign:"center", cursor:"pointer", maxWidth:460 }}>
@@ -8310,8 +8241,8 @@ export default function App() {
                         </>
                       )}
 
-                      <MeasureLine m={ms.len} which="len" color="#22D3EE" />
-                      <MeasureLine m={ms.wid} which="wid" color="#F59E0B" />
+                      {MeasureLine({ m: ms.len, which: "len", color: "#22D3EE" })}
+                      {MeasureLine({ m: ms.wid, which: "wid", color: "#F59E0B" })}
                     </div>
                   </div>
                 )}
@@ -8328,14 +8259,14 @@ export default function App() {
                   ) : (
                     <>
                       <div style={{ display:"flex", gap:6, marginBottom:9 }}>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 270) % 360 } : null)} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>↺ 90°</button>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 90) % 360 } : null)} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>↻ 90°</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 270) % 360 } : null)} disabled={!ms.img || ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>↺ 90°</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 90) % 360 } : null)} disabled={!ms.img || ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>↻ 90°</button>
                       </div>
                       <div style={{ fontSize:9, color:C.dim, marginBottom:4 }}>SIZE · {Math.round(ms.zoom * 100)}%</div>
-                      <input type="range" min="0.5" max="2" step="0.05" value={ms.zoom} disabled={ms.done} onChange={e => setMapSetup(s => s ? { ...s, zoom: parseFloat(e.target.value) } : null)} style={{ width:"100%", marginBottom:8 }} />
+                      <input type="range" min="0.5" max="2" step="0.05" value={ms.zoom} disabled={!ms.img || ms.done} onChange={e => setMapSetup(s => s ? { ...s, zoom: parseFloat(e.target.value) } : null)} style={{ width:"100%", marginBottom:8 }} />
                       <div style={{ display:"flex", gap:6 }}>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, zoom: 1 } : null)} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Fit</button>
-                        <button onClick={() => { const inp = document.createElement("input"); inp.type="file"; inp.accept="image/*"; inp.onchange = (ev: Event) => { const f = (ev.target as HTMLInputElement).files?.[0]; if (f) msUpload(f) }; inp.click() }} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Replace</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, zoom: 1 } : null)} disabled={!ms.img || ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>Fit</button>
+                        <button onClick={() => msFileRef.current?.click()} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Replace</button>
                       </div>
                       <div style={{ fontSize:10, color:C.dim, marginTop:8, lineHeight:1.5 }}>
                         Rotating and resizing never move the measurement dots relative to the image.
@@ -8346,8 +8277,8 @@ export default function App() {
 
                 {!ms.changeViewOnly && (
                   <>
-                    <MsSection title="Length" m={ms.len} which="len" color="#22D3EE" />
-                    <MsSection title="Width" m={ms.wid} which="wid" color="#F59E0B" />
+                    {MsSection({ title: "Length", m: ms.len, which: "len", color: "#22D3EE" })}
+                    {MsSection({ title: "Width", m: ms.wid, which: "wid", color: "#F59E0B" })}
                   </>
                 )}
 
@@ -8447,6 +8378,347 @@ export default function App() {
 
               </div>
             </div>
+          </div>
+        )
+      })()}
+
+      {/* ── DRAW PATH PROMPT ─────────────────────────────────────────────────────── */}
+      {drawPathPrompt && (() => {
+        const pipe = pipes.find(p => p.id === drawPathPrompt.pipeId)
+        const video = pipe?.videos.find(v => v.id === drawPathPrompt.videoId)
+        if (!pipe || !video) { setDrawPathPrompt(null); return null }
+        const stopFt = parseFloat(video.stopFootage || "0") || 0
+        const endObs = video.observations.find(o => o.type === "end-of-pipe" || o.type === "camera-stoppage")
+        const dirChanges = video.observations.filter(o => o.type === "direction-change")
+        const fromAsset = assets.find(a => a.id === pipe.fromId)
+        const startVertex: RouteVertex = {
+          x: fromAsset ? fromAsset.x : (pipe.fromX ?? 50),
+          y: fromAsset ? fromAsset.y : (pipe.fromY ?? 50),
+          atFootage: 0,
+          observationIds: [],
+          assetId: fromAsset?.id,
+        }
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 400, background: "rgba(10,16,22,0.65)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 28, width: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: C.muted, marginBottom: 10 }}>Draw the path?</div>
+              <div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, marginBottom: 14 }}>The inspection is done, so you now know where this pipe runs.</div>
+              <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 7, padding: "10px 14px", marginBottom: 18, display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: C.text }}>
+                {stopFt > 0 && <div>· {stopFt} ft inspected</div>}
+                {endObs && <div>· Ends at {endObs.type === "camera-stoppage" ? "a camera stoppage" : "pipe end"}{video.whyStopped ? ` — ${video.whyStopped.toLowerCase()}` : ""}</div>}
+                {dirChanges.map(d => <div key={d.id}>· Direction change at {d.footage} ft</div>)}
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  onClick={() => {
+                    setDrawPathPrompt(null)
+                    setAssistedDraw({ pipeId: pipe.id, vertices: [startVertex], placedObsIds: [], selection: [], addingShapingPt: false, cursorPos: null, unwindConfirm: null })
+                  }}
+                  style={{ flex: 1, padding: "10px", fontSize: 12, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}
+                >Draw it now</button>
+                <button
+                  onClick={() => setDrawPathPrompt(null)}
+                  style={{ flex: 1, padding: "10px", fontSize: 12, fontWeight: 600, background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer" }}
+                >Later</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ── ASSISTED DRAWING OVERLAY ──────────────────────────────────────────────── */}
+      {assistedDraw && (() => {
+        const ad = assistedDraw
+        const pipe = pipes.find(p => p.id === ad.pipeId)
+        if (!pipe) { setAssistedDraw(null); return null }
+        const video = pipe.videos.find(v => (v.inspStep || 1) >= 7) ?? pipe.videos[0]
+        if (!video) { setAssistedDraw(null); return null }
+
+        const allObs = [...video.observations].sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
+        const lastVertex = ad.vertices[ad.vertices.length - 1]
+        const nextUnplacedIdx = allObs.findIndex(o => !ad.placedObsIds.includes(o.id))
+        const selectionSet = new Set(ad.selection)
+
+        // Compute target footage from last selected observation
+        const lastSel = ad.selection.length > 0 ? allObs.find(o => o.id === ad.selection[ad.selection.length - 1]) : null
+        const targetFt = lastSel ? parseFloat(lastSel.footage || "0") - lastVertex.atFootage : 0
+
+        // Ring radius in canvas % (convert ft → canvas %)
+        const pctPerFt = siteMap
+          ? 100 / (siteMap.scale * siteMap.imageW * siteMap.viewRect.w)
+          : 0
+        const ringRadiusPct = targetFt > 0 && pctPerFt > 0 ? targetFt * pctPerFt : 0
+
+        // Whether all boundary observations are placed
+        const boundaryObs = allObs.filter(o => o.type === "end-of-pipe" || o.type === "camera-stoppage")
+        const canFinish = boundaryObs.length > 0 && boundaryObs.every(o => ad.placedObsIds.includes(o.id))
+        const unplacedCount = allObs.filter(o => !ad.placedObsIds.includes(o.id)).length
+        const stopFt = parseFloat(video.stopFootage || "0") || 0
+
+        // Project a point onto the ring
+        const projectOntoRing = (cx: number, cy: number, px: number, py: number, r: number) => {
+          const dx = px - cx, dy = py - cy
+          const dist = Math.hypot(dx, dy)
+          if (dist === 0) return { x: cx, y: cy - r }
+          return { x: cx + (dx / dist) * r, y: cy + (dy / dist) * r }
+        }
+
+        // Live cursor marker position on ring
+        const markerOnRing = ad.cursorPos && ringRadiusPct > 0
+          ? projectOntoRing(lastVertex.x, lastVertex.y, ad.cursorPos.x, ad.cursorPos.y, ringRadiusPct)
+          : null
+
+        const startAssisted = () => {
+          // Initiate the assisted draw session — open overlay
+          setAssistedDraw(ad)
+        }
+
+        const handleAdMapClick = (cx: number, cy: number, shiftKey: boolean) => {
+          if (ad.addingShapingPt) {
+            // Shaping point: no observations, interpolated footage
+            const prevVert = ad.vertices[ad.vertices.length - 1]
+            const newVert: RouteVertex = { x: cx, y: cy, atFootage: prevVert.atFootage, observationIds: [], isShaping: true }
+            setAssistedDraw(s => s ? { ...s, vertices: [...s.vertices, newVert], addingShapingPt: false } : null)
+            return
+          }
+          if (ad.selection.length === 0) return // no selection — do nothing
+          let finalX = cx, finalY = cy
+          let offTarget = false
+          if (!shiftKey && ringRadiusPct > 0) {
+            const snapped = projectOntoRing(lastVertex.x, lastVertex.y, cx, cy, ringRadiusPct)
+            finalX = snapped.x; finalY = snapped.y
+          } else if (shiftKey) {
+            offTarget = true
+          }
+          const selObs = allObs.find(o => o.id === ad.selection[ad.selection.length - 1])
+          const newFt = selObs ? parseFloat(selObs.footage || "0") : lastVertex.atFootage
+          const newVert: RouteVertex = { x: finalX, y: finalY, atFootage: newFt, observationIds: [...ad.selection], offTarget }
+          setAssistedDraw(s => s ? { ...s, vertices: [...s.vertices, newVert], placedObsIds: [...s.placedObsIds, ...ad.selection], selection: [], cursorPos: null } : null)
+        }
+
+        const handleVertexClick = (vertIdx: number) => {
+          if (vertIdx === 0) return // start vertex immovable
+          const segsAfter = ad.vertices.length - 1 - vertIdx
+          const obsAfter = ad.vertices.slice(vertIdx + 1).flatMap(v => v.observationIds)
+          if (segsAfter > 1) {
+            setAssistedDraw(s => s ? { ...s, unwindConfirm: { vertIdx, segCount: segsAfter, obsCount: obsAfter.length } } : null)
+          } else {
+            // Unwind directly
+            setAssistedDraw(s => s ? { ...s, vertices: s.vertices.slice(0, vertIdx + 1), placedObsIds: s.placedObsIds.filter(id => !obsAfter.includes(id) && !s.vertices[vertIdx].observationIds.includes(id)), selection: [], cursorPos: null } : null)
+          }
+        }
+
+        const handleUndo = () => {
+          if (ad.vertices.length <= 1) return
+          const last = ad.vertices[ad.vertices.length - 1]
+          setAssistedDraw(s => s ? { ...s, vertices: s.vertices.slice(0, -1), placedObsIds: s.placedObsIds.filter(id => !last.observationIds.includes(id)), selection: [], cursorPos: null } : null)
+        }
+
+        const handleFinish = () => {
+          const lastV = ad.vertices[ad.vertices.length - 1]
+          const hasCameraStoppage = boundaryObs.some(o => o.type === "camera-stoppage")
+          let finalVertices = [...ad.vertices]
+          // Draw estimated tail for camera stoppage
+          if (hasCameraStoppage && video.estimatedLength) {
+            const estRemaining = parseFloat(video.estimatedLength) - lastV.atFootage
+            if (estRemaining > 0 && pctPerFt > 0) {
+              // Continue on last heading
+              const prev = ad.vertices.length >= 2 ? ad.vertices[ad.vertices.length - 2] : null
+              const dx = prev ? lastV.x - prev.x : 0
+              const dy = prev ? lastV.y - prev.y : 1
+              const len = Math.hypot(dx, dy) || 1
+              const tailDist = estRemaining * pctPerFt
+              finalVertices = [...finalVertices, { x: lastV.x + (dx / len) * tailDist, y: lastV.y + (dy / len) * tailDist, atFootage: lastV.atFootage + estRemaining, observationIds: [], isShaping: true }]
+            }
+          }
+          setPipes(prev => prev.map(p => p.id === ad.pipeId ? { ...p, vertices: finalVertices, geometryStatus: "drawn" as const, toId: lastV.assetId ?? p.toId } : p))
+          setAssistedDraw(null)
+        }
+
+        return (
+          <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", pointerEvents: "none" }}>
+            {/* Right observation panel */}
+            <div style={{ marginLeft: "auto", width: 340, height: "100%", background: C.panel, borderLeft: `1px solid ${C.border}`, display: "flex", flexDirection: "column", pointerEvents: "all", boxShadow: "-4px 0 20px rgba(0,0,0,0.12)" }}>
+              {/* Header */}
+              <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: C.muted }}>Draw path — {pipe.label}</div>
+                  <button onClick={() => setAssistedDraw(null)} style={{ fontSize: 13, color: C.muted, background: "none", border: "none", cursor: "pointer", padding: "2px 6px" }}>✕</button>
+                </div>
+                <div style={{ fontSize: 11, color: C.text }}>
+                  {ad.selection.length === 0 && !ad.addingShapingPt && <span style={{ color: C.dim, fontStyle: "italic" }}>Select observations for the next segment.</span>}
+                  {ad.addingShapingPt && <span style={{ color: C.cyan }}>Click the map to place a shaping point.</span>}
+                  {ad.selection.length > 0 && !ad.addingShapingPt && <span style={{ color: C.cyan }}>Click the map to set direction — {targetFt.toFixed(0)} ft segment.</span>}
+                </div>
+              </div>
+
+              {/* Observation list */}
+              <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
+                {allObs.map((obs, idx) => {
+                  const placed = ad.placedObsIds.includes(obs.id)
+                  const selIdx = ad.selection.indexOf(obs.id)
+                  const selected = selIdx >= 0
+                  const reachable = !placed && idx <= (nextUnplacedIdx >= 0 ? nextUnplacedIdx + ad.selection.length + 3 : allObs.length)
+                  const isLastPlacedInSeg = placed && (() => {
+                    const nextObs = allObs[idx + 1]
+                    return !nextObs || !ad.placedObsIds.includes(nextObs.id)
+                  })()
+
+                  return (
+                    <div key={obs.id}>
+                      <div
+                        onClick={() => {
+                          if (placed || !reachable) return
+                          if (selected) {
+                            // Untick: remove from selection back to this point
+                            setAssistedDraw(s => s ? { ...s, selection: s.selection.slice(0, selIdx) } : null)
+                          } else {
+                            // Tick: select everything from nextUnplacedIdx up to this obs
+                            const newSel = allObs.slice(nextUnplacedIdx >= 0 ? nextUnplacedIdx : 0, idx + 1).map(o => o.id)
+                            setAssistedDraw(s => s ? { ...s, selection: newSel } : null)
+                          }
+                        }}
+                        style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 14px", opacity: placed ? 0.45 : !reachable ? 0.3 : 1, cursor: placed || !reachable ? "default" : "pointer", background: selected ? `${C.cyan}14` : "transparent" }}
+                      >
+                        {placed ? (
+                          <svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="#00803E" /><path d="M4 7l2 2 4-4" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" /></svg>
+                        ) : (
+                          <div style={{ width: 14, height: 14, borderRadius: 3, border: `1.5px solid ${selected ? C.cyan : C.border}`, background: selected ? `${C.cyan}22` : "transparent", flexShrink: 0 }} />
+                        )}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: placed ? C.muted : selected ? C.cyan : C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {obs.footage && `${obs.footage} ft · `}{obs.type.replace(/-/g, " ")}
+                            {obs.defectSubtype ? ` — ${obs.defectSubtype}` : ""}
+                          </div>
+                        </div>
+                      </div>
+                      {isLastPlacedInSeg && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 14px" }}>
+                          <div style={{ flex: 1, height: 1, background: C.border }} />
+                          <span style={{ fontSize: 9, color: C.dim, whiteSpace: "nowrap" }}>placed</span>
+                          <div style={{ flex: 1, height: 1, background: C.border }} />
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Off-target segments list */}
+              {ad.vertices.some(v => v.offTarget) && (
+                <div style={{ padding: "8px 14px", borderTop: `1px solid ${C.border}`, background: "#FFFBF0" }}>
+                  {ad.vertices.filter(v => v.offTarget).map((v, i) => {
+                    const prevV = ad.vertices[ad.vertices.indexOf(v) - 1]
+                    const expectedFt = v.atFootage - (prevV?.atFootage ?? 0)
+                    const drawnPct = Math.hypot(v.x - (prevV?.x ?? v.x), v.y - (prevV?.y ?? v.y))
+                    const drawnFt = pctPerFt > 0 ? drawnPct / pctPerFt : 0
+                    const diff = expectedFt > 0 ? ((drawnFt - expectedFt) / expectedFt * 100) : 0
+                    return (
+                      <div key={i} style={{ fontSize: 10, color: "#A96B00", lineHeight: 1.6 }}>
+                        Segment {ad.vertices.indexOf(v)} · {expectedFt.toFixed(0)} ft expected · {drawnFt.toFixed(0)} ft drawn · {diff > 0 ? "+" : ""}{diff.toFixed(0)}%
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Footer actions */}
+              <div style={{ padding: "10px 14px", borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    onClick={() => setAssistedDraw(s => s ? { ...s, addingShapingPt: true, selection: [] } : null)}
+                    disabled={ad.addingShapingPt}
+                    style={{ flex: 1, padding: "7px 10px", fontSize: 10, fontWeight: 600, background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: ad.addingShapingPt ? "not-allowed" : "pointer", opacity: ad.addingShapingPt ? 0.4 : 1 }}
+                  >+ Shaping point</button>
+                  <button
+                    onClick={handleUndo}
+                    disabled={ad.vertices.length <= 1}
+                    style={{ flex: 1, padding: "7px 10px", fontSize: 10, fontWeight: 600, background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: ad.vertices.length <= 1 ? "not-allowed" : "pointer", opacity: ad.vertices.length <= 1 ? 0.4 : 1 }}
+                  >↩ Undo point</button>
+                </div>
+                <button
+                  onClick={handleFinish}
+                  disabled={!canFinish}
+                  style={{ width: "100%", padding: "9px", fontSize: 12, fontWeight: 700, background: canFinish ? "#00803E" : C.card, color: canFinish ? "#fff" : C.dim, border: "none", borderRadius: 6, cursor: canFinish ? "pointer" : "default" }}
+                >
+                  {canFinish ? "Finish ✓" : `${unplacedCount} observation${unplacedCount !== 1 ? "s" : ""} left to place, up to ${stopFt} ft`}
+                </button>
+              </div>
+            </div>
+
+            {/* Unwind confirmation */}
+            {ad.unwindConfirm && (
+              <div style={{ position: "absolute", inset: 0, background: "rgba(10,16,22,0.5)", display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "all" }}>
+                <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24, width: 360, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+                  <div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, marginBottom: 16 }}>
+                    This removes {ad.unwindConfirm.segCount} segment{ad.unwindConfirm.segCount !== 1 ? "s" : ""} and returns {ad.unwindConfirm.obsCount} observation{ad.unwindConfirm.obsCount !== 1 ? "s" : ""} to unplaced.
+                  </div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => {
+                      const { vertIdx } = ad.unwindConfirm!
+                      const obsAfter = ad.vertices.slice(vertIdx + 1).flatMap(v => v.observationIds)
+                      const removedObs = [...obsAfter, ...ad.vertices[vertIdx].observationIds]
+                      setAssistedDraw(s => s ? { ...s, vertices: s.vertices.slice(0, vertIdx + 1), placedObsIds: s.placedObsIds.filter(id => !removedObs.includes(id)), selection: [], cursorPos: null, unwindConfirm: null } : null)
+                    }} style={{ flex: 1, padding: "9px", fontSize: 12, fontWeight: 700, background: "#DC2626", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}>Unwind</button>
+                    <button onClick={() => setAssistedDraw(s => s ? { ...s, unwindConfirm: null } : null)} style={{ flex: 1, padding: "9px", fontSize: 12, fontWeight: 600, background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 6, cursor: "pointer" }}>Cancel</button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Map SVG overlays (ring + live marker + vertex dots) — rendered over the map */}
+            {(() => {
+              // We need access to the map container to convert %-coords to screen coords.
+              // Since this overlay is position:fixed, we use the mapRef bounds.
+              const mR = mapRef.current?.getBoundingClientRect()
+              if (!mR) return null
+              // Helper: canvas % → screen px (accounting for pan/zoom)
+              // The 4000px canvas is centered within mapZoom transform, offset by mapPan
+              // screen_x = mR.left + mR.width * (0.5 + mapPan.x) + (pct/100 - 0.5) * 4000 * mapZoom
+              const pctToScreen = (px: number, py: number) => {
+                const sx = mR.left + mR.width * (0.5 + mapPan.x) + (px / 100 - 0.5) * 4000 * mapZoom
+                const sy = mR.top + mR.height * (0.5 + mapPan.y) + (py / 100 - 0.5) * 4000 * mapZoom
+                return { sx, sy }
+              }
+              const lastPScreen = pctToScreen(lastVertex.x, lastVertex.y)
+              const ringPxRadius = ringRadiusPct / 100 * 4000 * mapZoom
+
+              return (
+                <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}>
+                  {/* Existing placed vertex dots */}
+                  {ad.vertices.slice(1).map((v, i) => {
+                    const { sx, sy } = pctToScreen(v.x, v.y)
+                    return (
+                      <g key={i} style={{ cursor: "pointer", pointerEvents: "all" }} onClick={() => handleVertexClick(i + 1)}>
+                        <circle cx={sx} cy={sy} r={v.isShaping ? 5 : 7} fill={v.offTarget ? "#F59E0B" : C.cyan} stroke={C.panel} strokeWidth="1.5" />
+                        {!v.isShaping && (
+                          <text x={sx} y={sy - 10} textAnchor="middle" fontSize="9" fill={C.cyan} fontFamily="JetBrains Mono">{v.atFootage.toFixed(0)}ft</text>
+                        )}
+                      </g>
+                    )
+                  })}
+                  {/* Start vertex */}
+                  {(() => { const { sx, sy } = pctToScreen(ad.vertices[0].x, ad.vertices[0].y); return <circle cx={sx} cy={sy} r="8" fill={C.cyan} stroke={C.panel} strokeWidth="2" /> })()}
+                  {/* Line from last vertex to live marker */}
+                  {markerOnRing && (() => {
+                    const { sx: mx, sy: my } = pctToScreen(markerOnRing.x, markerOnRing.y)
+                    return <line x1={lastPScreen.sx} y1={lastPScreen.sy} x2={mx} y2={my} stroke={C.cyan} strokeWidth="1.5" strokeDasharray="5 4" opacity="0.7" />
+                  })()}
+                  {/* Distance ring */}
+                  {ringRadiusPct > 0 && (
+                    <g>
+                      <circle cx={lastPScreen.sx} cy={lastPScreen.sy} r={ringPxRadius} fill="none" stroke={C.cyan} strokeWidth="1.5" strokeDasharray="8 5" opacity="0.55" />
+                      <text x={lastPScreen.sx} y={lastPScreen.sy - ringPxRadius - 6} textAnchor="middle" fontSize="10" fill={C.cyan} fontFamily="JetBrains Mono" opacity="0.8">~{targetFt.toFixed(0)} ft</text>
+                    </g>
+                  )}
+                  {/* Live marker on ring */}
+                  {markerOnRing && (() => {
+                    const { sx: mx, sy: my } = pctToScreen(markerOnRing.x, markerOnRing.y)
+                    return <circle cx={mx} cy={my} r="5" fill={C.cyan} stroke={C.panel} strokeWidth="1.5" opacity="0.85" />
+                  })()}
+                </svg>
+              )
+            })()}
           </div>
         )
       })()}
