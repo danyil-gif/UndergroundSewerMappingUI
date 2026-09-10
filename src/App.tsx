@@ -89,12 +89,6 @@ interface RouteVertex {
   isShaping?: boolean   // shaping point — no observations, interpolated footage
 }
 
-interface PipeEndpoint {
-  type: string
-  diameter: string
-  depth: string
-}
-
 interface PipeTransition {
   id: string
   footage: string   // footage along the run where transition occurs
@@ -114,10 +108,6 @@ interface Pipe {
   waypoints: RoutePoint[]  // intermediate routing points
   vertices?: RouteVertex[] // assisted-drawing vertices (replaces waypoints when present)
   geometryStatus?: "stub" | "drawn"
-  length: string
-  slope: string
-  start?: PipeEndpoint
-  end?: PipeEndpoint
   transitions?: PipeTransition[]
   videos: CamVideo[]
   archived?: boolean
@@ -511,8 +501,7 @@ const SAMPLE_OBSERVATIONS: AssetObservation[] = [
 const SAMPLE_PIPES: Pipe[] = [
   {
     id: "p1", label: "PIPE-001", fromId: "a1", toId: "a2",
-    waypoints: [], length: "127", slope: "1.2%",
-    start: { type: "Cast Iron", diameter: '6"', depth: "6.5" },
+    waypoints: [],
     videos: [{
       id: "v1", name: "PIPE-001_DS_2024-03-15.mp4", date: "2024-03-15",
       operator: "J. Martinez", direction: "downstream",
@@ -531,23 +520,23 @@ const SAMPLE_PIPES: Pipe[] = [
   },
   {
     id: "p2", label: "PIPE-002", fromId: "a2", toId: "a5",
-    waypoints: [], length: "89", slope: "0.8%",
+    waypoints: [],
     videos: []
   },
   {
     id: "p3", label: "PIPE-003", fromId: "a5", toId: "a3",
-    waypoints: [], length: "73", slope: "1.5%",
+    waypoints: [],
     videos: []
   },
   {
     id: "p4", label: "PIPE-004", fromId: "a4", toId: "a5",
-    waypoints: [], length: "54", slope: "2.1%",
+    waypoints: [],
     videos: []
   },
   {
     id: "p5", label: "PIPE-005", fromId: "a3", toId: null,
     toX: 85, toY: 55,
-    waypoints: [], length: "", slope: "",
+    waypoints: [],
     geometryStatus: "stub",
     videos: []
   },
@@ -640,6 +629,37 @@ const REACHED_REASONS = new Set([
   "Reached a 90° fitting — end of the pipe",
   "Reached a septic tank or lift station",
 ])
+function pipeFacts(pipe: Pipe) {
+  const insp = [...pipe.videos]
+    .filter(v => (v.inspStep || 1) >= 6)
+    .sort((a, b) => b.date.localeCompare(a.date))[0]
+  if (!insp) return null
+  const obs = insp.observations ?? []
+  const sop  = obs.find(o => o.type === "start-of-pipe")
+  const eop  = obs.find(o => o.type === "end-of-pipe" || o.type === "camera-stoppage")
+  const chars = insp.characteristics ?? []
+  const first = chars.find(c => c.isStart)
+  const last  = chars.find(c => c.isEnd)
+  const lengthFt = insp.fullyInspected === "No" && insp.estimatedLength
+    ? parseFloat(insp.estimatedLength)
+    : parseFloat(insp.stopFootage ?? "0")
+  const startDepth = parseFloat(first?.depth ?? "0")
+  const endDepth   = parseFloat(last?.depth ?? "0")
+  return {
+    startType: sop?.pipeType ?? null,
+    startSize: sop?.pipeSize ?? null,
+    startDepth: first?.depth ?? null,
+    endType: eop?.pipeType ?? null,
+    endSize: eop?.pipeSize ?? null,
+    endDepth: last?.depth ?? null,
+    lengthFt,
+    lengthEstimated: insp.fullyInspected === "No",
+    slopePct: lengthFt > 0 ? ((endDepth - startDepth) / lengthFt) * 100 : null,
+    endKind: eop?.type ?? null,
+    inspection: insp,
+  }
+}
+
 function posAtFootage(ft: number, verts: RouteVertex[]): { x: number; y: number } | null {
   for (let i = 1; i < verts.length; i++) {
     const a = verts[i - 1], b = verts[i]
@@ -918,8 +938,9 @@ function PipeProfileSVG({ video, pipe, onClickObs }: {
   const pipeTrans = video.observations.filter(o => o.type === "pipe-transition")
     .sort((a, b) => parseFloat(a.footage || "0") - parseFloat(b.footage || "0"))
   const matSecs: { s: number; e: number; type: string; size: string }[] = []
-  let mType = video.entryPipeType || pipe.start?.type || ""
-  let mSize = video.entryPipeSize || pipe.start?.diameter || ""
+  const _pf = pipeFacts(pipe)
+  let mType = video.entryPipeType || _pf?.startType || ""
+  let mSize = video.entryPipeSize || _pf?.startSize || ""
   let mStart = 0
   for (const tr of pipeTrans) {
     const ft = parseFloat(tr.footage || "0")
@@ -1600,12 +1621,8 @@ export default function App() {
   const pipeDragRef = useRef<{ startX: number; startW: number } | null>(null)
   const [editingPipe, setEditingPipe] = useState(false)
   const [pipeForm, setPipeForm] = useState<{
-    start: PipeEndpoint
-    end: PipeEndpoint
-    length: string
-    slope: string
     transitions: PipeTransition[]
-  }>({ start: { type: "", diameter: "", depth: "" }, end: { type: "", diameter: "", depth: "" }, length: "", slope: "", transitions: [] })
+  }>({ transitions: [] })
   const [showVideoForm, setShowVideoForm] = useState(false)
   const [videoForm, setVideoForm] = useState({ name: "", date: "", operator: "", direction: "downstream" as "upstream" | "downstream" })
   const [videoDragOver, setVideoDragOver] = useState(false)
@@ -1877,7 +1894,6 @@ export default function App() {
       toY: toAssetId ? undefined : last.y,
       waypoints,
       geometryStatus: toAssetId ? "drawn" : "stub",
-      length: "", slope: "",
       videos: [],
     }
     if (finishDrawingPipeId) {
@@ -1913,7 +1929,7 @@ export default function App() {
       setSelectedAssetId(null)
       setSelectedVideoId(null)
       setEditingPipe(true)
-      setPipeForm({ start: { type: "", diameter: "", depth: "" }, end: { type: "", diameter: "", depth: "" }, length: "", slope: "", transitions: [] })
+      setPipeForm({ transitions: [] })
     }
   }, [drawFrom, drawFromCoord, drawPoints, pipes, finishDrawingPipeId])
 
@@ -2070,29 +2086,8 @@ export default function App() {
 
   const savePipe = () => {
     if (!selectedPipeId) return
-    updatePipe(selectedPipeId, {
-      start: pipeForm.start,
-      end: pipeForm.end,
-      length: pipeForm.length,
-      slope: pipeForm.slope,
-      transitions: pipeForm.transitions,
-    }, "pipe endpoint updated")
+    updatePipe(selectedPipeId, { transitions: pipeForm.transitions }, "pipe transitions updated")
     setEditingPipe(false)
-  }
-
-  const applyAnalysisToPipe = (pipeId: string) => {
-    const pipe = pipes.find(p => p.id === pipeId)
-    if (!pipe) return
-    const bestVideo = [...pipe.videos].reverse().find(v => v.runStart && v.runEnd)
-    if (!bestVideo) return
-    const rs = bestVideo.runStart!
-    const re = bestVideo.runEnd!
-    const length = String(Math.abs(parseFloat(re.footage) - parseFloat(rs.footage)).toFixed(0))
-    updatePipe(pipeId, {
-      start: { type: rs.pipeType, diameter: rs.pipeSize, depth: rs.depth },
-      end:   { type: re.pipeType, diameter: re.pipeSize, depth: re.depth },
-      length,
-    }, "pipe endpoint updated")
   }
 
   const addVideoWithName = (name: string) => {
@@ -3441,7 +3436,7 @@ export default function App() {
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 11, fontWeight: 600, color: sel ? "#1a1a1a" : C.text, fontFamily: "JetBrains Mono" }}>{pipe.label}</div>
-                      <div style={{ fontSize: 10, color: C.muted }}>{fr?.label ?? "?"} → {to?.label ?? "free"} · {pipe.start?.diameter || "—"}</div>
+                      <div style={{ fontSize: 10, color: C.muted }}>{fr?.label ?? "?"} → {to?.label ?? "free"} · {pipeFacts(pipe)?.startSize || "—"}</div>
                     </div>
                     {analysisComplete && (
                       <div title="Analysis complete" style={{ flexShrink: 0, width: 16, height: 16, borderRadius: "50%", background: "#00803E", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -4160,7 +4155,7 @@ export default function App() {
                         transform="translate(-30, -14)" />
                       <text x={`${midPt.x}%`} y={`${midPt.y}%`} textAnchor="middle" fill={lineColor} fontSize="8.5" fontFamily="JetBrains Mono">
                         <tspan dy="-5" dx="0">{pipe.label}</tspan>
-                        <tspan x={`${midPt.x}%`} dy="12" fill="#64748B">{pipe.start?.diameter || "—"}{pipe.start?.type ? ` ${pipe.start.type}` : ""}</tspan>
+                        <tspan x={`${midPt.x}%`} dy="12" fill="#64748B">{(() => { const f = pipeFacts(pipe); return (f?.startSize || "—") + (f?.startType ? ` ${f.startType}` : "") })()}</tspan>
                       </text>
                     </g>
                   )}
@@ -4523,7 +4518,7 @@ export default function App() {
                   {viewPipes.map(p => (
                     <div key={p.id} onClick={() => selectPipe(p.id)} style={{ padding: "8px 10px", marginBottom: 5, borderRadius: 5, background: C.card, border: `1px solid ${C.border}`, cursor: "pointer" }}>
                       <div style={{ fontSize: 11, fontWeight: 600, color: C.blue, fontFamily: "JetBrains Mono" }}>{p.label}</div>
-                      <div style={{ fontSize: 10, color: C.muted }}>{p.start?.diameter || "—"} · {p.start?.type || "—"} · {p.videos.length} inspection{p.videos.length !== 1 ? "s" : ""}</div>
+                      <div style={{ fontSize: 10, color: C.muted }}>{(() => { const f = pipeFacts(p); return `${f?.startSize || "—"} · ${f?.startType || "—"}` })()} · {p.videos.length} inspection{p.videos.length !== 1 ? "s" : ""}</div>
                     </div>
                   ))}
                 </Section>
@@ -5771,7 +5766,7 @@ export default function App() {
                     onMouseEnter={e => (e.currentTarget.style.borderColor = C.blue)} onMouseLeave={e => (e.currentTarget.style.borderColor = C.border)}>
                     <div>
                       <div style={{ fontSize: 11, fontWeight: 600, color: "#0369A1", fontFamily: "JetBrains Mono" }}>{pipe.label}</div>
-                      <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>{pipe.start?.diameter || "—"} · {pipe.length ? pipe.length + " ft" : "—"} · {pipe.start?.type || "—"}</div>
+                      <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>{(() => { const f = pipeFacts(pipe); return `${f?.startSize || "—"} · ${f?.lengthFt ? f.lengthFt.toFixed(0) + " ft" : "—"} · ${f?.startType || "—"}` })()}</div>
                     </div>
                     <div style={{ fontSize: 10, color: pipe.videos.length > 0 ? C.cyan : C.dim }}>{pipe.videos.length} video{pipe.videos.length !== 1 ? "s" : ""}</div>
                   </div>
@@ -5820,13 +5815,7 @@ export default function App() {
                     onClick={() => {
                       if (editingPipe) { setEditingPipe(false); return }
                       setEditingPipe(true)
-                      setPipeForm({
-                        start: selectedPipe.start ?? { type: "", diameter: "", depth: "" },
-                        end: selectedPipe.end ?? { type: "", diameter: "", depth: "" },
-                        length: selectedPipe.length,
-                        slope: selectedPipe.slope,
-                        transitions: selectedPipe.transitions ?? [],
-                      })
+                      setPipeForm({ transitions: selectedPipe.transitions ?? [] })
                     }}
                     style={{ padding: "5px 10px", fontSize: 10, fontWeight: 600, borderRadius: 5, cursor: "pointer", background: C.card, color: editingPipe ? C.muted : C.cyan, border: `1px solid ${editingPipe ? C.border : C.cyan + "44"}`, letterSpacing: "0.04em" }}
                   >
@@ -5879,23 +5868,24 @@ export default function App() {
               </div>
             )}
 
-            {/* Length comparison (drawn path vs stop footage) */}
-            {selectedPipe.geometryStatus === "drawn" && selectedPipe.length && (() => {
+            {/* Length comparison (drawn path vs inspected footage) */}
+            {selectedPipe.geometryStatus === "drawn" && (() => {
+              const facts = pipeFacts(selectedPipe)
+              if (!facts || facts.lengthFt <= 0) return null
+              const inspFt = facts.lengthFt
               const stopFt = selectedPipe.videos.reduce((acc, v) => {
                 const ft = parseFloat(v.stopFootage ?? "")
                 return !isNaN(ft) && ft > 0 ? ft : acc
               }, 0)
               if (!stopFt) return null
-              const drawnFt = parseFloat(selectedPipe.length)
-              if (isNaN(drawnFt) || drawnFt <= 0) return null
-              const diff = Math.abs(drawnFt - stopFt) / stopFt
+              const diff = Math.abs(inspFt - stopFt) / stopFt
               const pct = (diff * 100).toFixed(0)
               const color = diff < 0.05 ? "#00803E" : "#A96B00"
               return (
                 <div style={{ margin: "0 16px 0", padding: "8px 12px", borderRadius: 7, background: diff < 0.05 ? "#E8F4EF" : "#FFFBF0", border: `1px solid ${color}44` }}>
                   <div style={{ fontSize: 10, color, fontFamily: "JetBrains Mono", lineHeight: 1.6 }}>
-                    Inspected {stopFt} ft · drawn path measures {drawnFt} ft · {pct}% longer
-                    {diff > 0.15 && <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 9.5, color: "#A96B00", marginTop: 2 }}>Check the traced path or the reel counter.</div>}
+                    Inspected {stopFt} ft · derived length {inspFt.toFixed(0)} ft · {pct}% diff
+                    {diff > 0.15 && <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: 9.5, color: "#A96B00", marginTop: 2 }}>Check the reel counter or estimated total.</div>}
                   </div>
                 </div>
               )
@@ -5904,103 +5894,62 @@ export default function App() {
             {/* Pipe Overview */}
             {(() => {
               const pipe = selectedPipe
+              const facts = pipeFacts(pipe)
+              const sv = facts?.inspection ?? null
+              const newerIncomplete = sv ? pipe.videos.some(v => (v.inspStep || 1) < 7 && pipe.videos.indexOf(v) > pipe.videos.indexOf(sv)) : false
 
-              // Source video: most recent complete (inspStep>=7), else most recent with characteristics
-              const completeVids = pipe.videos.filter(v => (v.inspStep || 1) >= 7)
-              const sourceVideo = completeVids.length > 0
-                ? completeVids[completeVids.length - 1]
-                : pipe.videos.slice().reverse().find(v => v.characteristics && v.characteristics.length >= 2)
-              const newerIncomplete = completeVids.length > 0 && pipe.videos.some(v =>
-                (v.inspStep || 1) < 7 && pipe.videos.indexOf(v) > pipe.videos.indexOf(completeVids[completeVids.length - 1])
-              )
-
-              // Keep legacy auto-fill logic (best video with runStart+runEnd)
-              const bestVideo = [...pipe.videos].reverse().find(v => v.runStart && v.runEnd)
-              const analysisStart = bestVideo ? { type: bestVideo.runStart!.pipeType, diameter: bestVideo.runStart!.pipeSize, depth: bestVideo.runStart!.depth } : null
-              const analysisEnd   = bestVideo ? { type: bestVideo.runEnd!.pipeType,   diameter: bestVideo.runEnd!.pipeSize,   depth: bestVideo.runEnd!.depth }   : null
-              const analysisLength = bestVideo ? String(Math.abs(parseFloat(bestVideo.runEnd!.footage) - parseFloat(bestVideo.runStart!.footage)).toFixed(0)) : null
-
-              const hasPendingUpdate = !!(analysisStart && analysisEnd && (
-                !pipe.start ||
-                pipe.start.type !== analysisStart.type ||
-                pipe.start.diameter !== analysisStart.diameter ||
-                pipe.start.depth !== analysisStart.depth ||
-                !pipe.end ||
-                pipe.end.type !== analysisEnd.type ||
-                pipe.end.diameter !== analysisEnd.diameter ||
-                pipe.end.depth !== analysisEnd.depth ||
-                (analysisLength && pipe.length !== analysisLength)
-              ))
-
-              // Coverage
-              const totalLength = parseFloat(pipe.length || "0")
+              // Coverage against derived length
+              const totalLength = facts?.lengthFt ?? 0
               const inspectedLengths = pipe.videos.filter(v => v.runStart && v.runEnd).map(v => Math.abs(parseFloat(v.runEnd!.footage) - parseFloat(v.runStart!.footage)))
               const inspectedLength = inspectedLengths.length > 0 ? Math.max(...inspectedLengths) : 0
               const coveragePct = totalLength > 0 ? Math.min(100, (inspectedLength / totalLength) * 100) : (inspectedLength > 0 ? 100 : 0)
               const coverageColor = coveragePct >= 90 ? "#00803E" : coveragePct > 0 ? "#A96B00" : C.dim
 
-              // Transitions: from explicit list + auto-detected if start≠end
-              const hasTypeChange = pipe.start && pipe.end && (pipe.start.type !== pipe.end.type || pipe.start.diameter !== pipe.end.diameter)
-
               return (
                 <Section>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                     <Label>Pipe Overview</Label>
-                    {!editingPipe && (
+                    {!editingPipe && sv && (
                       <button
-                        onClick={() => {
-                          if (sourceVideo) {
-                            setSelectedVideoId(sourceVideo.id)
-                            setEditingStep(7)
-                          } else {
-                            setEditingPipe(true)
-                            setPipeForm({ start: pipe.start ?? { type: "", diameter: "", depth: "" }, end: pipe.end ?? { type: "", diameter: "", depth: "" }, length: pipe.length, slope: pipe.slope, transitions: pipe.transitions ?? [] })
-                          }
-                        }}
+                        onClick={() => { setSelectedVideoId(sv.id); setEditingStep(7) }}
+                        style={{ padding: "3px 9px", fontSize: 9.5, fontWeight: 700, background: C.card, color: C.cyan, border: `1px solid ${C.cyan}44`, borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
+                      >Edit inspection</button>
+                    )}
+                    {!editingPipe && pipe.transitions && pipe.transitions.length > 0 && !sv && (
+                      <button
+                        onClick={() => { setEditingPipe(true); setPipeForm({ transitions: pipe.transitions ?? [] }) }}
                         style={{ padding: "3px 9px", fontSize: 9.5, fontWeight: 700, background: C.card, color: C.cyan, border: `1px solid ${C.cyan}44`, borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
                       >Edit</button>
                     )}
                   </div>
 
-                  {/* Source attribution + profile graphic */}
-                  {sourceVideo && !editingPipe && (() => {
-                    const sv = sourceVideo
-                    const completenessLine = (() => {
-                      if (sv.fullyInspected === "Yes") {
-                        return <span style={{ color: "#00803E" }}>Full length inspected{sv.whyStopped ? ` · ${sv.whyStopped.toLowerCase()}` : ""}</span>
-                      }
-                      if (sv.fullyInspected === "No") {
-                        return <span style={{ color: "#A96B00" }}>Did not reach the end{sv.estimatedLength ? ` · est. ${sv.estimatedLength} ft total` : ""}</span>
-                      }
-                      return <span style={{ color: C.dim, fontStyle: "italic" }}>Inspection in progress</span>
-                    })()
+                  {/* Source video attribution + profile */}
+                  {sv && !editingPipe && (() => {
+                    const completenessLine = sv.fullyInspected === "Yes"
+                      ? <span style={{ color: "#00803E" }}>Full length inspected{sv.whyStopped ? ` · ${sv.whyStopped.toLowerCase()}` : ""}</span>
+                      : sv.fullyInspected === "No"
+                        ? <span style={{ color: "#A96B00" }}>Did not reach the end{sv.estimatedLength ? ` · est. ${sv.estimatedLength} ft total` : ""}</span>
+                        : <span style={{ color: C.dim, fontStyle: "italic" }}>Inspection in progress</span>
                     return (
                       <div style={{ marginBottom: 10 }}>
                         <div style={{ fontSize: 9.5, color: C.muted, marginBottom: 2 }}>
-                          <span
-                            onClick={() => setSelectedVideoId(sv.id)}
-                            style={{ color: C.cyan, cursor: "pointer", fontWeight: 600 }}
-                          >{sv.name}</span>
-                          {sv.date ? ` · ${sv.date}` : ""}
-                          {sv.operator ? ` · ${sv.operator}` : ""}
+                          <span onClick={() => setSelectedVideoId(sv.id)} style={{ color: C.cyan, cursor: "pointer", fontWeight: 600 }}>{sv.name}</span>
+                          {sv.date ? ` · ${sv.date}` : ""}{sv.operator ? ` · ${sv.operator}` : ""}
                         </div>
                         <div style={{ fontSize: 9.5, marginBottom: newerIncomplete ? 4 : 0 }}>{completenessLine}</div>
-                        {newerIncomplete && (
-                          <div style={{ fontSize: 9.5, color: C.muted, fontStyle: "italic" }}>A newer inspection is still in progress.</div>
-                        )}
-                        {/* Profile graphic */}
+                        {newerIncomplete && <div style={{ fontSize: 9.5, color: C.muted, fontStyle: "italic" }}>A newer inspection is still in progress.</div>}
                         <div style={{ marginTop: 10, border: `1px solid ${C.border}`, borderRadius: 6, overflow: "hidden", background: "#fff" }}>
                           <PipeProfileSVG video={sv} pipe={pipe} onClickObs={id => {
                             setSelectedVideoId(sv.id)
-                            const obsIdx = sv.observations.findIndex(o => o.id === id)
-                            if (obsIdx !== -1) setEditingStep(5)
+                            if (sv.observations.findIndex(o => o.id === id) !== -1) setEditingStep(5)
                           }} />
                         </div>
                       </div>
                     )
                   })()}
 
-                  {!sourceVideo && !editingPipe && (
+                  {/* No inspection yet */}
+                  {!facts && !editingPipe && (
                     <div style={{ padding: "14px 12px", marginBottom: 10, borderRadius: 6, background: C.card, border: `1px solid ${C.border}`, fontSize: 10, color: C.dim, fontStyle: "italic", textAlign: "center" }}>
                       No camera inspection yet. This fills in once one is completed.
                     </div>
@@ -6012,7 +5961,7 @@ export default function App() {
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                         <div style={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>INSPECTION COVERAGE</div>
                         <div style={{ fontSize: 9.5, fontFamily: "JetBrains Mono", fontWeight: 700, color: coverageColor }}>
-                          {inspectedLength > 0 ? `${inspectedLength.toFixed(0)} ft` : "—"}{totalLength > 0 ? ` / ${totalLength} ft` : ""}
+                          {inspectedLength > 0 ? `${inspectedLength.toFixed(0)} ft` : "—"}{totalLength > 0 ? ` / ${totalLength.toFixed(0)} ft` : ""}
                         </div>
                       </div>
                       <div style={{ height: 6, borderRadius: 3, background: C.border, overflow: "hidden" }}>
@@ -6024,103 +5973,85 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Inspected vs drawn length comparison */}
-                  {(() => {
-                    const stopFt = pipe.videos.reduce((max, v) => {
-                      const f = parseFloat(v.stopFootage || "0")
-                      return f > max ? f : max
-                    }, 0)
-                    const drawnFt = parseFloat(pipe.length || "0")
-                    if (stopFt <= 0 || drawnFt <= 0 || pipe.geometryStatus === "stub") return null
-                    const diff = Math.abs(drawnFt - stopFt) / stopFt
-                    const pct = Math.round(diff * 100)
-                    const compColor = diff < 0.05 ? "#00803E" : "#A96B00"
-                    return (
-                      <div style={{ marginBottom: 12, padding: "8px 10px", borderRadius: 5, background: compColor + "10", border: `1px solid ${compColor}33`, fontSize: 10, color: compColor, lineHeight: 1.5 }}>
-                        <span style={{ fontFamily: "JetBrains Mono", fontWeight: 700 }}>Inspected {stopFt.toFixed(0)} ft</span>
-                        {" · "}drawn path measures {drawnFt} ft{" · "}{pct}% {drawnFt > stopFt ? "longer" : "shorter"}
-                        {diff > 0.15 && <div style={{ marginTop: 4 }}>Check the traced path or the reel counter.</div>}
-                      </div>
-                    )
-                  })()}
-
-                  {/* Auto-fill banner */}
-                  {hasPendingUpdate && !editingPipe && (
-                    <div style={{ marginBottom: 12, padding: "9px 11px", borderRadius: 6, background: "#FFF8F0", border: "1px solid #A96B0044", display: "flex", alignItems: "center", gap: 10 }}>
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="#A96B00" strokeWidth="1.2"/><path d="M7 4v3.5l2 2" stroke="#A96B00" strokeWidth="1.2" strokeLinecap="round"/></svg>
-                      <div style={{ flex: 1, fontSize: 10, color: "#A96B00", lineHeight: 1.4 }}>
-                        Analysis data available — start/end characteristics can be updated from the latest complete run.
-                      </div>
-                      <button
-                        onClick={() => applyAnalysisToPipe(pipe.id)}
-                        style={{ flexShrink: 0, padding: "4px 10px", fontSize: 9.5, fontWeight: 700, background: "#A96B00", color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 4, cursor: "pointer", letterSpacing: "0.04em" }}
-                      >Apply</button>
-                    </div>
-                  )}
-
-                  {/* START / END columns */}
-                  {editingPipe ? (
+                  {/* Derived facts: START / END / LENGTH / SLOPE */}
+                  {facts && !editingPipe && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                        {/* START */}
-                        <div style={{ padding: "10px 11px", borderRadius: 7, border: `1.5px solid ${C.cyan}`, background: "#F0F8FF", display: "flex", flexDirection: "column", gap: 8 }}>
-                          <div style={{ fontSize: 9, fontWeight: 700, color: C.cyan, letterSpacing: "0.1em", textTransform: "uppercase" }}>START</div>
-                          <div>
-                            <FieldLabel text="TYPE" />
-                            <select value={pipeForm.start.type} onChange={e => setPipeForm(f => ({ ...f, start: { ...f.start, type: e.target.value } }))} style={{ ...inputSt, width: "100%" }}>
-                              <option value="">— select —</option>
-                              {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                            </select>
+                        {/* START card */}
+                        <div style={{ padding: "10px 12px", borderRadius: 7, border: `1px solid ${C.cyan}44`, background: "#F0F8FF" }}>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: C.cyan, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>START</div>
+                          <div style={{ marginBottom: 5 }}>
+                            <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Type</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.startType || "—"}</div>
+                          </div>
+                          <div style={{ marginBottom: 5 }}>
+                            <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Diameter</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.startSize || "—"}</div>
                           </div>
                           <div>
-                            <FieldLabel text="DIAMETER" />
-                            <select value={pipeForm.start.diameter} onChange={e => setPipeForm(f => ({ ...f, start: { ...f.start, diameter: e.target.value } }))} style={{ ...inputSt, width: "100%" }}>
-                              <option value="">— select —</option>
-                              {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                          </div>
-                          <div>
-                            <FieldLabel text="DEPTH (ft)" />
-                            <input type="number" value={pipeForm.start.depth} onChange={e => setPipeForm(f => ({ ...f, start: { ...f.start, depth: e.target.value } }))} placeholder="0.0" style={{ ...inputSt, width: "100%" }} />
+                            <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Depth</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.startDepth ? facts.startDepth + " ft" : "—"}</div>
                           </div>
                         </div>
-                        {/* END */}
-                        <div style={{ padding: "10px 11px", borderRadius: 7, border: `1.5px solid #CE1A74`, background: "#FFF5FA", display: "flex", flexDirection: "column", gap: 8 }}>
-                          <div style={{ fontSize: 9, fontWeight: 700, color: "#CE1A74", letterSpacing: "0.1em", textTransform: "uppercase" }}>END</div>
-                          <div>
-                            <FieldLabel text="TYPE" />
-                            <select value={pipeForm.end.type} onChange={e => setPipeForm(f => ({ ...f, end: { ...f.end, type: e.target.value } }))} style={{ ...inputSt, width: "100%" }}>
-                              <option value="">— select —</option>
-                              {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                            </select>
+                        {/* END card */}
+                        <div style={{ padding: "10px 12px", borderRadius: 7, border: "1px solid #CE1A7444", background: "#FFF5FA" }}>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: "#CE1A74", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>
+                            {facts.endKind === "camera-stoppage" ? "Camera stoppage" : "END"}
+                          </div>
+                          <div style={{ marginBottom: 5 }}>
+                            <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Type</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.endType || "—"}</div>
+                          </div>
+                          <div style={{ marginBottom: 5 }}>
+                            <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Diameter</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.endSize || "—"}</div>
                           </div>
                           <div>
-                            <FieldLabel text="DIAMETER" />
-                            <select value={pipeForm.end.diameter} onChange={e => setPipeForm(f => ({ ...f, end: { ...f.end, diameter: e.target.value } }))} style={{ ...inputSt, width: "100%" }}>
-                              <option value="">— select —</option>
-                              {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                          </div>
-                          <div>
-                            <FieldLabel text="DEPTH (ft)" />
-                            <input type="number" value={pipeForm.end.depth} onChange={e => setPipeForm(f => ({ ...f, end: { ...f.end, depth: e.target.value } }))} placeholder="0.0" style={{ ...inputSt, width: "100%" }} />
+                            <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Depth</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.endDepth ? facts.endDepth + " ft" : "—"}</div>
                           </div>
                         </div>
                       </div>
 
                       {/* Length + Slope */}
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                        <div>
-                          <FieldLabel text="TOTAL LENGTH (ft)" />
-                          <input type="number" value={pipeForm.length} onChange={e => setPipeForm(f => ({ ...f, length: e.target.value }))} placeholder="0" style={{ ...inputSt, width: "100%" }} />
+                        <div style={{ padding: "8px 10px", background: C.card, borderRadius: 5, border: `1px solid ${C.border}` }}>
+                          <div style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 3 }}>
+                            <div style={{ fontSize: 9, color: C.muted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Total Length</div>
+                            {facts.lengthEstimated && <span style={{ fontSize: 8, fontWeight: 700, color: "#A96B00", background: "#FFF8F0", border: "1px solid #A96B0044", borderRadius: 3, padding: "0 4px" }}>EST</span>}
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.lengthFt > 0 ? facts.lengthFt.toFixed(0) + " ft" : "—"}</div>
                         </div>
-                        <div>
-                          <FieldLabel text="SLOPE (%)" />
-                          <input value={pipeForm.slope} onChange={e => setPipeForm(f => ({ ...f, slope: e.target.value }))} placeholder="0.00%" style={{ ...inputSt, width: "100%" }} />
+                        <div style={{ padding: "8px 10px", background: C.card, borderRadius: 5, border: `1px solid ${C.border}` }}>
+                          <div style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 3 }}>
+                            <div style={{ fontSize: 9, color: C.muted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Slope</div>
+                            <span style={{ fontSize: 8, fontWeight: 700, color: C.dim, background: C.card, border: `1px solid ${C.border}`, borderRadius: 3, padding: "0 4px" }}>derived</span>
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{facts.slopePct != null ? facts.slopePct.toFixed(1) + "%" : "—"}</div>
                         </div>
                       </div>
 
-                      {/* Transitions edit */}
+                      {/* Stored transitions view */}
+                      {pipe.transitions && pipe.transitions.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>TRANSITIONS</div>
+                          {pipe.transitions.map(tr => (
+                            <div key={tr.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", marginBottom: 5, borderRadius: 5, background: C.card, border: `1px solid ${C.border}` }}>
+                              <div style={{ fontSize: 10, fontFamily: "JetBrains Mono", color: C.muted, minWidth: 36 }}>{tr.footage ? tr.footage + " ft" : "—"}</div>
+                              <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><path d="M1 5h10M7 1l4 4-4 4" stroke={C.muted} strokeWidth="1.2" strokeLinecap="round"/></svg>
+                              <div style={{ fontSize: 10, fontWeight: 600, color: C.text }}>{tr.type || "—"}</div>
+                              {tr.diameter && <div style={{ fontSize: 10, color: C.muted }}>{tr.diameter}</div>}
+                            </div>
+                          ))}
+                          <button onClick={() => { setEditingPipe(true); setPipeForm({ transitions: pipe.transitions ?? [] }) }} style={{ width: "100%", padding: "5px", fontSize: 9.5, color: C.muted, background: "none", border: `1px dashed ${C.border}`, borderRadius: 4, cursor: "pointer" }}>Edit transitions</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Transitions edit form */}
+                  {editingPipe && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                       <div>
                         <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>TRANSITIONS</div>
                         {pipeForm.transitions.map((tr, idx) => (
@@ -6148,77 +6079,10 @@ export default function App() {
                         ))}
                         <button onClick={() => setPipeForm(f => ({ ...f, transitions: [...f.transitions, { id: `tr${Date.now()}`, footage: "", type: "", diameter: "" }] }))} style={{ width: "100%", padding: "6px", fontSize: 10, fontWeight: 600, background: C.card, color: C.muted, border: `1px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Add Transition Point</button>
                       </div>
-
-                      {/* Save / Cancel */}
                       <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
                         <button onClick={() => setEditingPipe(false)} style={{ flex: 1, padding: "8px", fontSize: 10.5, background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Cancel</button>
-                        <button onClick={savePipe} style={{ flex: 2, padding: "8px", fontSize: 10.5, fontWeight: 700, background: C.blue, color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: "pointer", letterSpacing: "0.05em", textTransform: "uppercase" }}>Save Changes</button>
+                        <button onClick={savePipe} style={{ flex: 2, padding: "8px", fontSize: 10.5, fontWeight: 700, background: C.blue, color: "#fff", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", borderRadius: 5, cursor: "pointer", letterSpacing: "0.05em", textTransform: "uppercase" }}>Save</button>
                       </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {/* START / END view cards */}
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                        {([
-                          { label: "START", ep: pipe.start, color: C.cyan, bg: "#F0F8FF" },
-                          { label: "END",   ep: pipe.end,   color: "#CE1A74", bg: "#FFF5FA" },
-                        ] as { label: string; ep: PipeEndpoint | undefined; color: string; bg: string }[]).map(({ label, ep, color, bg }) => (
-                          <div key={label} style={{ padding: "10px 12px", borderRadius: 7, border: `1px solid ${color}44`, background: ep ? bg : C.card }}>
-                            <div style={{ fontSize: 9, fontWeight: 700, color, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>{label}</div>
-                            {ep ? (
-                              <>
-                                <div style={{ marginBottom: 5 }}>
-                                  <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Type</div>
-                                  <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{ep.type || "—"}</div>
-                                </div>
-                                <div style={{ marginBottom: 5 }}>
-                                  <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Diameter</div>
-                                  <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{ep.diameter || "—"}</div>
-                                </div>
-                                <div>
-                                  <div style={{ fontSize: 8.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Depth</div>
-                                  <div style={{ fontSize: 12, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{ep.depth ? ep.depth + " ft" : "—"}</div>
-                                </div>
-                              </>
-                            ) : (
-                              <div style={{ fontSize: 10, color: C.dim, fontStyle: "italic" }}>Not recorded</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Length + Slope */}
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                        {[
-                          { label: "Total Length", value: pipe.length ? pipe.length + " ft" : "—" },
-                          { label: "Slope", value: pipe.slope || "—" },
-                        ].map(({ label, value }) => (
-                          <div key={label} style={{ padding: "8px 10px", background: C.card, borderRadius: 5, border: `1px solid ${C.border}` }}>
-                            <div style={{ fontSize: 9, color: C.muted, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 3 }}>{label}</div>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: C.text, fontFamily: "JetBrains Mono" }}>{value}</div>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Transitions view */}
-                      {(hasTypeChange || (pipe.transitions && pipe.transitions.length > 0)) && (
-                        <div>
-                          <div style={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>TRANSITIONS</div>
-                          {hasTypeChange && (!pipe.transitions || pipe.transitions.length === 0) && (
-                            <div style={{ padding: "7px 10px", borderRadius: 5, background: "#FFF8F0", border: "1px solid #A96B0033", fontSize: 10, color: "#A96B00" }}>
-                              Type or diameter changes between start and end — add a transition point to record where it occurs.
-                            </div>
-                          )}
-                          {(pipe.transitions ?? []).map(tr => (
-                            <div key={tr.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", marginBottom: 5, borderRadius: 5, background: C.card, border: `1px solid ${C.border}` }}>
-                              <div style={{ fontSize: 10, fontFamily: "JetBrains Mono", color: C.muted, minWidth: 36 }}>{tr.footage ? tr.footage + " ft" : "—"}</div>
-                              <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><path d="M1 5h10M7 1l4 4-4 4" stroke={C.muted} strokeWidth="1.2" strokeLinecap="round"/></svg>
-                              <div style={{ fontSize: 10, fontWeight: 600, color: C.text }}>{tr.type || "—"}</div>
-                              {tr.diameter && <div style={{ fontSize: 10, color: C.muted }}>{tr.diameter}</div>}
-                            </div>
-                          ))}
-                        </div>
-                      )}
                     </div>
                   )}
                 </Section>
@@ -6636,7 +6500,7 @@ export default function App() {
                       <rect x="6" y="166" width="96" height="14" fill="#00000080" rx="2" />
                       <text x="12" y="176" fill="#94A3B8" fontSize="7.5" fontFamily="JetBrains Mono">DIST: 41.0 ft</text>
                       <rect x="238" y="166" width="84" height="14" fill="#00000080" rx="2" />
-                      <text x="244" y="176" fill="#94A3B8" fontSize="7.5" fontFamily="JetBrains Mono">⌀{selectedPipe?.start?.diameter || "—"}</text>
+                      <text x="244" y="176" fill="#94A3B8" fontSize="7.5" fontFamily="JetBrains Mono">⌀{selectedPipe ? (pipeFacts(selectedPipe)?.startSize || "—") : "—"}</text>
                     </svg>
                     {/* Timeline scrubber */}
                     <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "6px 10px 7px", background: "linear-gradient(transparent, #040810E0)" }}>
@@ -7259,7 +7123,7 @@ export default function App() {
             <rect x="12" y="326" width="148" height="22" fill="#00000080" rx="3" />
             <text x="18" y="340" fill="#94A3B8" fontSize="11.5" fontFamily="JetBrains Mono">DIST: 41.0 ft</text>
             <rect x="464" y="326" width="164" height="22" fill="#00000080" rx="3" />
-            <text x="470" y="340" fill="#94A3B8" fontSize="11.5" fontFamily="JetBrains Mono">⌀{pipe?.start?.diameter ?? "—"} {pipe?.start?.type ?? ""}</text>
+            <text x="470" y="340" fill="#94A3B8" fontSize="11.5" fontFamily="JetBrains Mono">⌀{pipe ? (pipeFacts(pipe)?.startSize ?? "—") : "—"} {pipe ? (pipeFacts(pipe)?.startType ?? "") : ""}</text>
           </svg>
         )
 
