@@ -4199,8 +4199,8 @@ export default function App() {
             {/* ── In-progress pipe route preview ─────────────────────────────── */}
             {mode === "draw-pipe" && (drawFrom || drawFromCoord) && (() => {
               const startAsset = drawFrom ? assets.find(a => a.id === drawFrom) : null
-              const startX = startAsset ? startAsset.x : drawFromCoord!.x
-              const startY = startAsset ? startAsset.y : drawFromCoord!.y
+              const startX = startAsset ? startAsset.x : (drawFromCoord?.x ?? 50)
+              const startY = startAsset ? startAsset.y : (drawFromCoord?.y ?? 50)
               const preview: RoutePoint[] = [{ x: startX, y: startY }, ...drawPoints]
               const lastPt = preview[preview.length - 1]
               return (
