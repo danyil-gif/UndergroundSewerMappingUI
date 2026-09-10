@@ -1496,7 +1496,7 @@ export default function App() {
     changeViewOnly: boolean
   } | null>(null)
   const mapWrapRef = useRef<HTMLDivElement>(null)
-  const msFileRef = useRef<HTMLInputElement>(null)
+  const mapFileRef = useRef<HTMLInputElement>(null)
   const [mode, setMode] = useState<Mode>("view")
   const [addAssetType, setAddAssetType] = useState<AssetType>("catch-basin")
   const [drawFrom, setDrawFrom] = useState<string | null>(null)        // assetId start
@@ -3215,9 +3215,48 @@ export default function App() {
               {!siteMap ? (
                 <>
                   <div style={{ fontSize:10, color:C.dim, marginBottom:8 }}>No map yet.</div>
-                  <button onClick={() => setMapSetup({ img:null, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })}
+                  <input
+                    ref={mapFileRef}
+                    type="file"
+                    accept="image/*"
+                    style={{ display:"none" }}
+                    onChange={e => {
+                      const f = e.target.files?.[0]
+                      if (!f) return
+                      const fr = new FileReader()
+                      fr.onload = () => {
+                        setMapSetup({ img: fr.result as string, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })
+                      }
+                      fr.readAsDataURL(f)
+                      e.target.value = ""
+                    }}
+                  />
+                  <button
+                    onClick={() => mapFileRef.current?.click()}
+                    onDragOver={e => e.preventDefault()}
+                    onDrop={e => {
+                      e.preventDefault()
+                      const f = e.dataTransfer.files?.[0]
+                      if (!f) return
+                      const fr = new FileReader()
+                      fr.onload = () => {
+                        setMapSetup({ img: fr.result as string, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })
+                      }
+                      fr.readAsDataURL(f)
+                    }}
+                    onPaste={e => {
+                      const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith("image/"))
+                      if (!item) return
+                      const f = item.getAsFile()
+                      if (!f) return
+                      const fr = new FileReader()
+                      fr.onload = () => {
+                        setMapSetup({ img: fr.result as string, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })
+                      }
+                      fr.readAsDataURL(f)
+                    }}
                     style={{ width:"100%", padding:"8px 10px", fontSize:10, fontWeight:600, background:C.card, color:C.cyan, border:`1.5px solid ${C.cyan}44`, borderRadius:5, cursor:"pointer" }}>
-                    + Add new map
+                    + Upload map image
                   </button>
                 </>
               ) : (
@@ -8010,7 +8049,6 @@ export default function App() {
         }
 
         const msImgClick = (e: React.MouseEvent) => {
-          if (ms.done) return
           const p = msToPct(e); if (!p) return
           const u = msUnspin(p, ms.rot)
           if (ms.msMode === "len") {
@@ -8057,8 +8095,8 @@ export default function App() {
               )}
               {([["a", A], ["b", m.b ? msSpin(m.b, ms.rot) : null]] as const).map(([k, P]) => P && (
                 <div key={k}
-                  onMouseDown={e => { e.stopPropagation(); if (!ms.done && live) setMapSetup(s => s ? { ...s, msDrag: { t:"dot", m:which, k } } : null) }}
-                  style={{ position:"absolute", left:`${P.x}%`, top:`${P.y}%`, width:32, height:32, marginLeft:-16, marginTop:-16, display:"flex", alignItems:"center", justifyContent:"center", cursor:live && !ms.done ? "grab" : "default", zIndex:6 }}>
+                  onMouseDown={e => { e.stopPropagation(); if (live) setMapSetup(s => s ? { ...s, msDrag: { t:"dot", m:which, k } } : null) }}
+                  style={{ position:"absolute", left:`${P.x}%`, top:`${P.y}%`, width:32, height:32, marginLeft:-16, marginTop:-16, display:"flex", alignItems:"center", justifyContent:"center", cursor:live ? "grab" : "default", zIndex:6 }}>
                   <div style={{ width:11, height:11, borderRadius:99, background:color, border:"2px solid #0F1419" }} />
                 </div>
               ))}
@@ -8088,7 +8126,7 @@ export default function App() {
                 <>
                   <div style={{ fontFamily:MONO_F, fontSize:14, color:"#22C55E", marginBottom:3 }}>✓ {m.ft} ft{m.inches ? ` ${m.inches} in` : ""}</div>
                   <div style={{ fontFamily:MONO_F, fontSize:10, color:C.dim, marginBottom:8 }}>{msRatio(m)?.toFixed(4)} ft/px</div>
-                  <button onClick={() => msStartMeasure(which)} disabled={ms.done} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Edit</button>
+                  <button onClick={() => msStartMeasure(which)} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Edit</button>
                 </>
               ) : placing ? (
                 <>
@@ -8120,7 +8158,7 @@ export default function App() {
               ) : (
                 <>
                   <div style={{ fontSize:11, color:C.dim, marginBottom:8 }}>Not measured</div>
-                  <button onClick={() => msStartMeasure(which)} disabled={!ms.img || ms.done} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>Start measuring</button>
+                  <button onClick={() => msStartMeasure(which)} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:C.text, border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Start measuring</button>
                 </>
               )}
             </div>
@@ -8165,13 +8203,10 @@ export default function App() {
             }}
             onMouseUp={() => setMapSetup(s => s ? { ...s, msDrag: null } : null)}>
 
-            <input ref={msFileRef} type="file" accept="image/*" style={{ display:"none" }} onChange={e => { const f = e.target.files?.[0]; if (f) msUpload(f); e.target.value = "" }} />
-
             {/* Title bar */}
             <div style={{ height:46, borderBottom:`1px solid ${C.border}`, display:"flex", alignItems:"center", padding:"0 16px", gap:12, flexShrink:0 }}>
               <span style={{ fontWeight:700, fontSize:14 }}>Set up the map</span>
               {ms.changeViewOnly && <span style={{ color:"#8B97A5", fontSize:12 }}>Changing view only</span>}
-              {ms.done && <span style={{ marginLeft:"auto", color:"#22C55E", fontSize:12, fontWeight:700 }}>✓ FINALIZED</span>}
               <button onClick={() => setMapSetup(null)} style={{ marginLeft:"auto", padding:"4px 12px", fontSize:10, fontWeight:700, background:"none", border:`1px solid ${C.border}`, borderRadius:5, color:C.muted, cursor:"pointer" }}>✕ Close</button>
             </div>
 
@@ -8179,18 +8214,7 @@ export default function App() {
 
               {/* Image area */}
               <div style={{ flex:1, padding:20, display:"flex", alignItems:"center", justifyContent:"center", overflow:"auto", background:"#0B0F13" }}>
-                {!ms.img ? (
-                  <div onClick={() => msFileRef.current?.click()}
-                    onDragOver={e => e.preventDefault()}
-                    onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) msUpload(f) }}
-                    style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:60, textAlign:"center", cursor:"pointer", maxWidth:460 }}>
-                    <div style={{ fontSize:15, fontWeight:700, marginBottom:8 }}>Drop a map screenshot here</div>
-                    <div style={{ fontSize:12, color:"#8B97A5", lineHeight:1.6 }}>
-                      Click to browse, drag a file in, or paste from the clipboard.<br /><br />
-                      Screenshot the property from your county GIS viewer. Frame the whole property with a little margin.
-                    </div>
-                  </div>
-                ) : (
+                {ms.img && (
                   <div style={{ position:"relative", transform:`scale(${ms.zoom})`, transformOrigin:"center", transition:ms.msDrag ? "none" : "transform 0.15s" }}>
                     <div ref={mapWrapRef} onClick={msImgClick}
                       onMouseMove={e => { const p = msToPct(e); if (p) setMapSetup(s => s ? { ...s, cursor: p } : null) }}
@@ -8211,13 +8235,13 @@ export default function App() {
                           ))}
                           <div
                             onMouseDown={e => {
-                              if (ms.msMode !== "view" || ms.done) return
+                              if (ms.msMode !== "view") return
                               e.stopPropagation()
                               const p = msToPct(e); if (!p) return
                               setMapSetup(s => s && s.view ? { ...s, msDrag: { t:"view-move", ox:s.view.x, oy:s.view.y, px:p.x, py:p.y } } : s)
                             }}
-                            style={{ position:"absolute", left:`${ms.view.x}%`, top:`${ms.view.y}%`, width:`${ms.view.w}%`, height:`${ms.view.h}%`, border:`2px solid #22D3EE`, zIndex:5, cursor:ms.msMode === "view" && !ms.done ? "move" : "default" }}>
-                            {ms.msMode === "view" && !ms.done && ([
+                            style={{ position:"absolute", left:`${ms.view.x}%`, top:`${ms.view.y}%`, width:`${ms.view.w}%`, height:`${ms.view.h}%`, border:`2px solid #22D3EE`, zIndex:5, cursor:ms.msMode === "view" ? "move" : "default" }}>
+                            {ms.msMode === "view" && ([
                               ["nw", 0, 0, ms.view.x + ms.view.w, ms.view.y + ms.view.h, "nwse-resize"],
                               ["ne", 100, 0, ms.view.x, ms.view.y + ms.view.h, "nesw-resize"],
                               ["sw", 0, 100, ms.view.x + ms.view.w, ms.view.y, "nesw-resize"],
@@ -8228,7 +8252,7 @@ export default function App() {
                                 <div style={{ width:11, height:11, background:"#22D3EE", border:"2px solid #0B0F13", borderRadius:2 }} />
                               </div>
                             ))}
-                            {ms.msMode === "view" && !ms.done && ([
+                            {ms.msMode === "view" && ([
                               ["l", { left:0, top:0, width:14, height:"100%", marginLeft:-7 }, "ew-resize"],
                               ["r", { left:"100%", top:0, width:14, height:"100%", marginLeft:-7 }, "ew-resize"],
                               ["t", { left:0, top:0, height:14, width:"100%", marginTop:-7 }, "ns-resize"],
@@ -8259,14 +8283,13 @@ export default function App() {
                   ) : (
                     <>
                       <div style={{ display:"flex", gap:6, marginBottom:9 }}>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 270) % 360 } : null)} disabled={!ms.img || ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>↺ 90°</button>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 90) % 360 } : null)} disabled={!ms.img || ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>↻ 90°</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 270) % 360 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>↺ 90°</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 90) % 360 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>↻ 90°</button>
                       </div>
                       <div style={{ fontSize:9, color:C.dim, marginBottom:4 }}>SIZE · {Math.round(ms.zoom * 100)}%</div>
-                      <input type="range" min="0.5" max="2" step="0.05" value={ms.zoom} disabled={!ms.img || ms.done} onChange={e => setMapSetup(s => s ? { ...s, zoom: parseFloat(e.target.value) } : null)} style={{ width:"100%", marginBottom:8 }} />
+                      <input type="range" min="0.5" max="2" step="0.05" value={ms.zoom} onChange={e => setMapSetup(s => s ? { ...s, zoom: parseFloat(e.target.value) } : null)} style={{ width:"100%", marginBottom:8 }} />
                       <div style={{ display:"flex", gap:6 }}>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, zoom: 1 } : null)} disabled={!ms.img || ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:(!ms.img || ms.done) ? "not-allowed" : "pointer", opacity:(!ms.img || ms.done) ? 0.32 : 1 }}>Fit</button>
-                        <button onClick={() => msFileRef.current?.click()} disabled={ms.done} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:ms.done ? "not-allowed" : "pointer", opacity:ms.done ? 0.32 : 1 }}>Replace</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, zoom: 1 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Fit</button>
                       </div>
                       <div style={{ fontSize:10, color:C.dim, marginTop:8, lineHeight:1.5 }}>
                         Rotating and resizing never move the measurement dots relative to the image.
@@ -8308,10 +8331,8 @@ export default function App() {
                       {areaFt && (
                         <div style={{ fontFamily:MONO_F, fontSize:12, color:"#22D3EE", marginBottom:9 }}>{areaFt.w.toFixed(0)} ft × {areaFt.h.toFixed(0)} ft</div>
                       )}
-                      {!ms.done && (
-                        <div style={{ fontSize:10, color:C.dim, lineHeight:1.5, marginBottom:9 }}>Drag a corner to resize, an edge to move one side, or hold inside to move the whole area.</div>
-                      )}
-                      {ms.msMode !== "view" && !ms.done && (
+                      <div style={{ fontSize:10, color:C.dim, lineHeight:1.5, marginBottom:9 }}>Drag a corner to resize, an edge to move one side, or hold inside to move the whole area.</div>
+                      {ms.msMode !== "view" && (
                         <button onClick={enterView} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Adjust area</button>
                       )}
                     </>
@@ -8320,57 +8341,40 @@ export default function App() {
 
                 {/* Finalize */}
                 <div style={{ padding:14 }}>
-                  {ms.done ? (
-                    <>
-                      <div style={{ fontSize:11, color:"#22C55E", lineHeight:1.6, marginBottom:10 }}>
-                        Saved — image, rotation, both measurements, scale and the selected view.
+                  <>
+                    <button
+                      disabled={ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)}
+                      onClick={() => {
+                        if (!ms.view) return
+                        if (ms.changeViewOnly) {
+                          setSiteMap(prev => prev ? { ...prev, viewName: ms.viewName, viewRect: { x: ms.view!.x/100, y: ms.view!.y/100, w: ms.view!.w/100, h: ms.view!.h/100 } } : null)
+                          setMapSetup(null)
+                        } else {
+                          if (!ms.img || !ms.len.a || !ms.len.b || !ms.wid.a || !ms.wid.b || !msScale) return
+                          setSiteMap({
+                            sourceUrl: ms.img,
+                            imageW: 620, imageH: 460,
+                            lengthPts: [ms.len.a.x/100, ms.len.a.y/100, ms.len.b.x/100, ms.len.b.y/100],
+                            widthPts: [ms.wid.a.x/100, ms.wid.a.y/100, ms.wid.b.x/100, ms.wid.b.y/100],
+                            lengthFt: parseFloat(ms.len.ft) + (parseFloat(ms.len.inches) || 0) / 12,
+                            widthFt: parseFloat(ms.wid.ft) + (parseFloat(ms.wid.inches) || 0) / 12,
+                            scale: msScale,
+                            viewName: ms.viewName,
+                            viewRect: { x: ms.view.x/100, y: ms.view.y/100, w: ms.view.w/100, h: ms.view.h/100 },
+                            uploadedAt: new Date().toLocaleDateString("en-US", { day:"numeric", month:"short", year:"numeric" }),
+                          })
+                          setMapSetup(null)
+                        }
+                      }}
+                      style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"#22C55E", color:"#052E16", border:"1px solid #22C55E", borderRadius:6, cursor:(ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)) ? "not-allowed" : "pointer", opacity:(ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)) ? 0.32 : 1, marginBottom:8 }}>
+                      {ms.changeViewOnly ? "SAVE VIEW" : "FINALIZE MAP VIEW"}
+                    </button>
+                    {!(ms.changeViewOnly ? ms.view : (bothDone && ms.view)) && (
+                      <div style={{ fontSize:10, color:C.dim, marginTop:7, lineHeight:1.5 }}>
+                        {!ms.img ? "Upload a map image." : !ms.len.confirmed ? "Confirm the length measurement." : !ms.wid.confirmed ? "Confirm the width measurement." : "Select the area the main map will show."}
                       </div>
-                      {!ms.changeViewOnly && msScale && areaFt && (
-                        <div style={{ fontFamily:MONO_F, fontSize:10, color:C.dim, lineHeight:1.7, background:C.bg, border:`1px solid ${C.border}`, borderRadius:5, padding:9, marginBottom:10 }}>
-                          Site plan uploaded — {ms.len.ft} ft × {ms.wid.ft} ft measured, scale {msScale.toFixed(4)} ft/px, view {areaFt.w.toFixed(0)} × {areaFt.h.toFixed(0)} ft
-                        </div>
-                      )}
-                      <button onClick={() => { setMapSetup(null) }} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer", marginBottom:8 }}>Close</button>
-                      {ms.changeViewOnly ? null : (
-                        <button onClick={() => setMapSetup(s => s ? { ...s, done:false, msMode:"view" } : null)} style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Change view</button>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        disabled={ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)}
-                        onClick={() => {
-                          if (!ms.view) return
-                          if (ms.changeViewOnly) {
-                            setSiteMap(prev => prev ? { ...prev, viewName: ms.viewName, viewRect: { x: ms.view!.x/100, y: ms.view!.y/100, w: ms.view!.w/100, h: ms.view!.h/100 } } : null)
-                            setMapSetup(null)
-                          } else {
-                            if (!ms.img || !ms.len.a || !ms.len.b || !ms.wid.a || !ms.wid.b || !msScale) return
-                            setSiteMap({
-                              sourceUrl: ms.img,
-                              imageW: 620, imageH: 460,
-                              lengthPts: [ms.len.a.x/100, ms.len.a.y/100, ms.len.b.x/100, ms.len.b.y/100],
-                              widthPts: [ms.wid.a.x/100, ms.wid.a.y/100, ms.wid.b.x/100, ms.wid.b.y/100],
-                              lengthFt: parseFloat(ms.len.ft) + (parseFloat(ms.len.inches) || 0) / 12,
-                              widthFt: parseFloat(ms.wid.ft) + (parseFloat(ms.wid.inches) || 0) / 12,
-                              scale: msScale,
-                              viewName: ms.viewName,
-                              viewRect: { x: ms.view.x/100, y: ms.view.y/100, w: ms.view.w/100, h: ms.view.h/100 },
-                              uploadedAt: new Date().toLocaleDateString("en-US", { day:"numeric", month:"short", year:"numeric" }),
-                            })
-                            setMapSetup(s => s ? { ...s, done: true, msMode: null } : null)
-                          }
-                        }}
-                        style={{ width:"100%", padding:"8px 12px", fontSize:12, fontWeight:700, background:"#22C55E", color:"#052E16", border:"1px solid #22C55E", borderRadius:6, cursor:(ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)) ? "not-allowed" : "pointer", opacity:(ms.changeViewOnly ? !ms.view : (!bothDone || !ms.view)) ? 0.32 : 1, marginBottom:8 }}>
-                        {ms.changeViewOnly ? "SAVE VIEW" : "FINALIZE MAP VIEW"}
-                      </button>
-                      {!(ms.changeViewOnly ? ms.view : (bothDone && ms.view)) && (
-                        <div style={{ fontSize:10, color:C.dim, marginTop:7, lineHeight:1.5 }}>
-                          {!ms.img ? "Upload a map image." : !ms.len.confirmed ? "Confirm the length measurement." : !ms.wid.confirmed ? "Confirm the width measurement." : "Select the area the main map will show."}
-                        </div>
-                      )}
-                    </>
-                  )}
+                    )}
+                  </>
                   <div style={{ fontSize:10, color:C.dim, marginTop:12, lineHeight:1.5 }}>
                     Measurements lock once finalized. Assets and pipe paths are positioned against this scale.
                   </div>
