@@ -278,6 +278,7 @@ interface SiteMapData {
   scale: number
   viewName: string
   viewRect: { x: number; y: number; w: number; h: number }
+  rotation: number
   uploadedAt: string
 }
 
@@ -1566,6 +1567,14 @@ export default function App() {
   const [launchOfficeProperty, setLaunchOfficeProperty] = useState("")
   const [launchOfficeReason, setLaunchOfficeReason] = useState("")
   const [launchBrowseProperty, setLaunchBrowseProperty] = useState("")
+  // Per-property persistence: map, assets, pipes survive across visits to the same property
+  const [jobStore, setJobStore] = useState<Record<string, { pipes: Pipe[]; assets: Asset[]; siteMap: SiteMapData | null; lockedAssetIds: string[] }>>({})
+  const jobPipesRef = useRef(pipes)
+  const jobSiteMapRef = useRef(siteMap)
+  const jobLockedRef = useRef(lockedAssetIds)
+  jobPipesRef.current = pipes
+  jobSiteMapRef.current = siteMap
+  jobLockedRef.current = lockedAssetIds
   const [showLaunchBrowsePicker, setShowLaunchBrowsePicker] = useState(false)
   const [historyPersonFilter, setHistoryPersonFilter] = useState("all")
   const [historyRangeFilter, setHistoryRangeFilter] = useState("30")
@@ -1629,6 +1638,7 @@ export default function App() {
   const [videoPlaying, setVideoPlaying] = useState(false)
   const [captureStep, setCaptureStep] = useState<"none" | "chooser" | ObsType>("none")
   const [captureForm, setCaptureForm] = useState<Record<string, unknown>>({})
+  const [editingObsId, setEditingObsId] = useState<string | null>(null)
   const [showRunEndForm, setShowRunEndForm] = useState(false)
   const [runEndForm, setRunEndForm] = useState({ footage: "", depth: "", pipeType: "PVC", pipeSize: '4"' })
   const [inspectionFullscreen, setInspectionFullscreen] = useState(false)
@@ -1656,18 +1666,26 @@ export default function App() {
     const el = mapRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
-      if (mode !== "view") return
       e.preventDefault()
       const rect = el.getBoundingClientRect()
-      const ox = (e.clientX - rect.left) / rect.width   // 0–1 pivot point
-      const oy = (e.clientY - rect.top) / rect.height
-      const delta = e.deltaY < 0 ? 1.1 : 1 / 1.1
-      setMapZoom(z => {
-        const next = Math.min(Math.max(z * delta, 0.25), 8)
-        const ratio = next / z
-        setMapPan(p => ({ x: ox - 0.5 - (ox - 0.5 - p.x) * ratio, y: oy - 0.5 - (oy - 0.5 - p.y) * ratio }))
-        return next
-      })
+      if (e.ctrlKey) {
+        // Touchpad pinch-to-zoom (or Ctrl+scroll)
+        const ox = (e.clientX - rect.left) / rect.width
+        const oy = (e.clientY - rect.top) / rect.height
+        const delta = e.deltaY < 0 ? 1.08 : 1 / 1.08
+        setMapZoom(z => {
+          const next = Math.min(Math.max(z * delta, 0.15), 12)
+          const ratio = next / z
+          setMapPan(p => ({ x: ox - 0.5 - (ox - 0.5 - p.x) * ratio, y: oy - 0.5 - (oy - 0.5 - p.y) * ratio }))
+          return next
+        })
+      } else {
+        // Touchpad two-finger scroll → pan
+        setMapPan(p => ({
+          x: p.x - e.deltaX / rect.width,
+          y: p.y - e.deltaY / rect.height,
+        }))
+      }
     }
     const onTouchStart = (e: TouchEvent) => {
       if (e.touches.length === 2) {
@@ -2140,11 +2158,17 @@ export default function App() {
   }
 
   const saveObservation = () => {
-    const obs: Observation = { id: `obs${Date.now()}`, type: captureStep as ObsType, ...captureForm } as Observation
+    const obsId = editingObsId ?? `obs${Date.now()}`
+    const obs: Observation = { id: obsId, type: captureStep as ObsType, ...captureForm } as Observation
     if (assetVideoSource) {
       const srcAsset = assets.find(a => a.id === assetVideoSource.assetId)
       updateAsset(assetVideoSource.assetId, {
-        videos: (srcAsset?.videos ?? []).map(v => v.id === assetVideoSource.videoId ? { ...v, observations: [...v.observations, obs] } : v)
+        videos: (srcAsset?.videos ?? []).map(v => v.id === assetVideoSource.videoId ? {
+          ...v,
+          observations: editingObsId
+            ? v.observations.map(o => o.id === editingObsId ? obs : o)
+            : [...v.observations, obs]
+        } : v)
       }, "inspection updated")
     } else {
       if (!selectedPipeId || !selectedVideoId) return
@@ -2152,11 +2176,17 @@ export default function App() {
       if (!pipe) return
       const obsDesc = `observation — ${obs.type}${(obs as any).severity ? ", " + (obs as any).severity : ""}${(obs as any).footage ? ", " + (obs as any).footage + " ft" : ""}`
       updatePipe(selectedPipeId, {
-        videos: pipe.videos.map(v => v.id === selectedVideoId ? { ...v, observations: [...v.observations, obs] } : v)
+        videos: pipe.videos.map(v => v.id === selectedVideoId ? {
+          ...v,
+          observations: editingObsId
+            ? v.observations.map(o => o.id === editingObsId ? obs : o)
+            : [...v.observations, obs]
+        } : v)
       }, obsDesc)
     }
     setCaptureStep("none")
     setCaptureForm({})
+    setEditingObsId(null)
   }
 
   const deleteObservation = (obsId: string) => {
@@ -2510,6 +2540,34 @@ export default function App() {
     appendLog(`${tag} ${description}`)
   }
 
+  function saveJobData(property: string) {
+    if (!property) return
+    setJobStore(prev => ({
+      ...prev,
+      [property]: {
+        pipes: jobPipesRef.current,
+        assets: assetsRef.current,
+        siteMap: jobSiteMapRef.current,
+        lockedAssetIds: [...jobLockedRef.current],
+      },
+    }))
+  }
+
+  function loadJobData(property: string) {
+    const saved = jobStore[property]
+    if (saved) {
+      setPipes(saved.pipes)
+      setAssets(saved.assets)
+      setSiteMap(saved.siteMap)
+      setLockedAssetIds(new Set(saved.lockedAssetIds))
+    } else {
+      setPipes([])
+      setAssets([])
+      setSiteMap(null)
+      setLockedAssetIds(new Set())
+    }
+  }
+
   function startVisit() {
     const job = SAMPLE_JOBS.find(j => j.id === launchJobId) ?? null
     const person = SITE_PERSONS.find(p => p.id === selectedPersonId)
@@ -2528,11 +2586,14 @@ export default function App() {
     setBrowseMode(false)
     setViewingVisitId(null)
     setShowVisitLog(false)
+    loadJobData(property)
     setAppView("simd")
   }
 
   function closeVisit() {
     if (!currentVisitId) return
+    const closingVisit = visits.find(v => v.id === currentVisitId)
+    if (closingVisit?.property) saveJobData(closingVisit.property)
     setVisits(vs => vs.map(v => v.id === currentVisitId
       ? { ...v, endedAt: Date.now(), visitNote: closeVisitNote, acceptedAtClose: Object.entries(closeAccepted).map(([item, reason]) => ({ item, reason })) }
       : v))
@@ -2803,7 +2864,7 @@ export default function App() {
                     <option value="">Select property to browse…</option>
                     {ALL_PROPERTIES.map(p => <option key={p} value={p}>{p}</option>)}
                   </select>
-                  <button onClick={() => { setBrowseMode(true); setCurrentVisitId(null); setViewingVisitId(null); setAppView("simd") }}
+                  <button onClick={() => { setBrowseMode(true); setCurrentVisitId(null); setViewingVisitId(null); loadJobData(launchBrowseProperty); setAppView("simd") }}
                     disabled={!launchBrowseProperty}
                     style={{ padding: "8px", fontSize: 11, fontWeight: 700, background: launchBrowseProperty ? C.cyan : C.card, color: launchBrowseProperty ? "#fff" : C.dim, border: `1px solid ${launchBrowseProperty ? C.cyan : C.border}`, borderRadius: 5, cursor: launchBrowseProperty ? "pointer" : "not-allowed" }}>
                     Browse
@@ -2848,7 +2909,7 @@ export default function App() {
                     const isOffice = v.visitType === "Office Update"
                     return (
                       <div key={v.id}
-                        onClick={() => { setViewingVisitId(v.id); setBrowseMode(true); setCurrentVisitId(null); setShowVisitLog(true); setAppView("simd") }}
+                        onClick={() => { setViewingVisitId(v.id); setBrowseMode(true); setCurrentVisitId(null); setShowVisitLog(true); loadJobData(v.property); setAppView("simd") }}
                         style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, cursor: "pointer", display: "flex", gap: 14, transition: "background 0.1s" }}
                         onMouseEnter={e => (e.currentTarget.style.background = C.card)}
                         onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
@@ -2917,11 +2978,11 @@ export default function App() {
               </span>
             )}
             <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-              <button onClick={() => { setAppView("launch"); setBrowseMode(false); setViewingVisitId(null); setShowVisitLog(false) }}
+              <button onClick={() => { const prop = viewingVisit?.property ?? launchBrowseProperty; if (prop) saveJobData(prop); setAppView("launch"); setBrowseMode(false); setViewingVisitId(null); setShowVisitLog(false) }}
                 style={{ fontSize: 11, padding: "4px 10px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", color: C.muted }}>
                 Back
               </button>
-              <button onClick={() => setAppView("launch")}
+              <button onClick={() => { const prop = viewingVisit?.property ?? launchBrowseProperty; if (prop) saveJobData(prop); setAppView("launch") }}
                 style={{ fontSize: 11, padding: "4px 10px", background: C.cyan, border: "none", borderRadius: 4, cursor: "pointer", color: "#fff", fontWeight: 600 }}>
                 Start a visit
               </button>
@@ -3198,7 +3259,7 @@ export default function App() {
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
 
         {/* Map section */}
-        <Section style={{ paddingBottom: leftSectionOpen.map ? undefined : 0 }}>
+        <Section style={{ paddingBottom: leftSectionOpen.map ? 14 : 0 }}>
           <button onClick={() => setLeftSectionOpen(s => ({ ...s, map: !s.map }))} style={{ display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",background:"none",borderTop:"none",borderRight:"none",borderBottom:"none",borderLeft:"none",cursor:"pointer",padding:0,marginBottom:leftSectionOpen.map ? 10 : 0 }}>
             <div style={{ fontSize:9, fontWeight:700, color:C.muted, letterSpacing:"0.09em", textTransform:"uppercase" }}>Map</div>
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ transform: leftSectionOpen.map ? "rotate(0deg)" : "rotate(-90deg)", transition:"transform 0.15s", flexShrink:0 }}>
@@ -3210,48 +3271,10 @@ export default function App() {
               {!siteMap ? (
                 <>
                   <div style={{ fontSize:10, color:C.dim, marginBottom:8 }}>No map yet.</div>
-                  <input
-                    ref={mapFileRef}
-                    type="file"
-                    accept="image/*"
-                    style={{ display:"none" }}
-                    onChange={e => {
-                      const f = e.target.files?.[0]
-                      if (!f) return
-                      const fr = new FileReader()
-                      fr.onload = () => {
-                        setMapSetup({ img: fr.result as string, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })
-                      }
-                      fr.readAsDataURL(f)
-                      e.target.value = ""
-                    }}
-                  />
                   <button
-                    onClick={() => mapFileRef.current?.click()}
-                    onDragOver={e => e.preventDefault()}
-                    onDrop={e => {
-                      e.preventDefault()
-                      const f = e.dataTransfer.files?.[0]
-                      if (!f) return
-                      const fr = new FileReader()
-                      fr.onload = () => {
-                        setMapSetup({ img: fr.result as string, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })
-                      }
-                      fr.readAsDataURL(f)
-                    }}
-                    onPaste={e => {
-                      const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith("image/"))
-                      if (!item) return
-                      const f = item.getAsFile()
-                      if (!f) return
-                      const fr = new FileReader()
-                      fr.onload = () => {
-                        setMapSetup({ img: fr.result as string, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })
-                      }
-                      fr.readAsDataURL(f)
-                    }}
+                    onClick={() => setMapSetup({ img:null, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })}
                     style={{ width:"100%", padding:"8px 10px", fontSize:10, fontWeight:600, background:C.card, color:C.cyan, border:`1.5px solid ${C.cyan}44`, borderRadius:5, cursor:"pointer" }}>
-                    + Upload map image
+                    + Add map
                   </button>
                 </>
               ) : (
@@ -3268,15 +3291,41 @@ export default function App() {
                         <div style={{ fontSize:8, fontWeight:700, color:C.muted, letterSpacing:"0.09em", textTransform:"uppercase", marginBottom:2 }}>View</div>
                         <div style={{ fontSize:10, color:C.text }}>{siteMap.viewName}</div>
                       </div>
-                      <button onClick={() => setMapSetup({ img:siteMap.sourceUrl, rot:0, zoom:1, len:{a:{x:siteMap.lengthPts[0]*100,y:siteMap.lengthPts[1]*100},b:{x:siteMap.lengthPts[2]*100,y:siteMap.lengthPts[3]*100},ft:String(siteMap.lengthFt),inches:"",confirmed:true}, wid:{a:{x:siteMap.widthPts[0]*100,y:siteMap.widthPts[1]*100},b:{x:siteMap.widthPts[2]*100,y:siteMap.widthPts[3]*100},ft:String(siteMap.widthFt),inches:"",confirmed:true}, msMode:"view", msDrag:null, cursor:null, view:{x:siteMap.viewRect.x*100,y:siteMap.viewRect.y*100,w:siteMap.viewRect.w*100,h:siteMap.viewRect.h*100}, viewName:siteMap.viewName, done:false, changeViewOnly:true })}
+                      <button onClick={() => setMapSetup({ img:siteMap.sourceUrl, rot:siteMap.rotation ?? 0, zoom:1, len:{a:{x:siteMap.lengthPts[0]*100,y:siteMap.lengthPts[1]*100},b:{x:siteMap.lengthPts[2]*100,y:siteMap.lengthPts[3]*100},ft:String(siteMap.lengthFt),inches:"",confirmed:true}, wid:{a:{x:siteMap.widthPts[0]*100,y:siteMap.widthPts[1]*100},b:{x:siteMap.widthPts[2]*100,y:siteMap.widthPts[3]*100},ft:String(siteMap.widthFt),inches:"",confirmed:true}, msMode:"view", msDrag:null, cursor:null, view:{x:siteMap.viewRect.x*100,y:siteMap.viewRect.y*100,w:siteMap.viewRect.w*100,h:siteMap.viewRect.h*100}, viewName:siteMap.viewName, done:false, changeViewOnly:true })}
                         style={{ fontSize:9.5, fontWeight:600, color:C.cyan, background:"none", border:`1px solid ${C.border}`, borderRadius:4, padding:"3px 8px", cursor:"pointer", flexShrink:0 }}>
                         Change view
                       </button>
                     </div>
-                    <button onClick={() => window.open(siteMap.sourceUrl, "_blank")}
-                      style={{ width:"100%", padding:"6px", fontSize:9.5, color:C.muted, background:"none", border:`1px solid ${C.border}`, borderRadius:4, cursor:"pointer" }}>
-                      View source image
+                    <button
+                      onClick={() => setMapSetup({ img:siteMap.sourceUrl, rot:siteMap.rotation ?? 0, zoom:1, len:{a:{x:siteMap.lengthPts[0]*100,y:siteMap.lengthPts[1]*100},b:{x:siteMap.lengthPts[2]*100,y:siteMap.lengthPts[3]*100},ft:String(siteMap.lengthFt),inches:"",confirmed:true}, wid:{a:{x:siteMap.widthPts[0]*100,y:siteMap.widthPts[1]*100},b:{x:siteMap.widthPts[2]*100,y:siteMap.widthPts[3]*100},ft:String(siteMap.widthFt),inches:"",confirmed:true}, msMode:null, msDrag:null, cursor:null, view:{x:siteMap.viewRect.x*100,y:siteMap.viewRect.y*100,w:siteMap.viewRect.w*100,h:siteMap.viewRect.h*100}, viewName:siteMap.viewName, done:false, changeViewOnly:false })}
+                      style={{ width:"100%", fontSize:9.5, fontWeight:600, color:C.muted, background:"none", border:`1px solid ${C.border}`, borderRadius:4, padding:"4px 8px", cursor:"pointer", textAlign:"left" }}>
+                      Change measurements
                     </button>
+                    <div style={{ display:"flex", gap:6 }}>
+                      <input
+                        id="map-replace-input"
+                        type="file"
+                        accept="image/*"
+                        style={{ display:"none" }}
+                        onChange={e => {
+                          const f = e.target.files?.[0]
+                          if (!f) return
+                          const fr = new FileReader()
+                          fr.onload = () => setSiteMap(prev => prev ? { ...prev, sourceUrl: fr.result as string } : null)
+                          fr.readAsDataURL(f)
+                          e.target.value = ""
+                        }}
+                      />
+                      <button
+                        onClick={() => document.getElementById("map-replace-input")?.click()}
+                        style={{ flex:1, padding:"6px", fontSize:9.5, color:C.muted, background:"none", border:`1px solid ${C.border}`, borderRadius:4, cursor:"pointer" }}>
+                        Replace image
+                      </button>
+                      <button onClick={() => window.open(siteMap.sourceUrl, "_blank")}
+                        style={{ flex:1, padding:"6px", fontSize:9.5, color:C.muted, background:"none", border:`1px solid ${C.border}`, borderRadius:4, cursor:"pointer" }}>
+                        View original
+                      </button>
+                    </div>
                   </div>
                   <div style={{ fontSize:9, color:C.dim, fontStyle:"italic", lineHeight:1.5, borderTop:`1px solid ${C.border}`, paddingTop:8 }}>
                     Measurements are locked once set. Assets and pipe paths are positioned against this scale.
@@ -3287,7 +3336,7 @@ export default function App() {
           )}
         </Section>
         {/* Add infrastructure */}
-        <Section style={{ paddingBottom: leftSectionOpen.infra ? undefined : 0 }}>
+        <Section style={{ paddingBottom: leftSectionOpen.infra ? 14 : 0 }}>
           <button
             onClick={() => setLeftSectionOpen(s => ({ ...s, infra: !s.infra }))}
             style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", borderLeft: "none", cursor: "pointer", padding: 0, marginBottom: leftSectionOpen.infra ? 10 : 0 }}
@@ -3346,7 +3395,6 @@ export default function App() {
             </>
           )}
         </Section>
-        <div style={{ height: 12 }} />
 
         {/* Assets + Pipes list (combined) */}
         <div style={{ borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0, flex: leftSectionOpen.assets ? 1 : undefined }}>
@@ -3985,50 +4033,51 @@ export default function App() {
             background: "#EEF3F8",
             boxShadow: "0 0 0 1px #D2DAE2, 0 8px 40px rgba(0,0,0,0.08)",
           }}>
-          {/* Site map image — rendered beneath assets, pipes and overlays */}
+          {/* Grid background — always visible */}
+          <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}>
+            <defs>
+              <pattern id="sg" width="24" height="24" patternUnits="userSpaceOnUse">
+                <path d="M 24 0 L 0 0 0 24" fill="none" stroke={C.cyan} strokeWidth="0.25" opacity="0.2" />
+              </pattern>
+              <pattern id="bg" width="120" height="120" patternUnits="userSpaceOnUse">
+                <rect width="120" height="120" fill="url(#sg)" />
+                <path d="M 120 0 L 0 0 0 120" fill="none" stroke={C.cyan} strokeWidth="0.6" opacity="0.12" />
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="#EEF3F8" />
+            <rect width="100%" height="100%" fill="url(#bg)" />
+            {!siteMap && <rect x="8%" y="8%" width="84%" height="84%" fill="none" stroke={C.cyan} strokeWidth="0.7" strokeDasharray="12 6" opacity="0.45" />}
+          </svg>
+
+          {/* Site map image — placed on top of grid, no stretching */}
           {siteMap ? (
-            <div style={{ position: "absolute", inset: 0, overflow: "hidden" }}>
-              <img
-                src={siteMap.sourceUrl}
-                alt=""
-                draggable={false}
-                style={{
-                  position: "absolute",
-                  width: `${100 / siteMap.viewRect.w}%`,
-                  height: `${100 / siteMap.viewRect.h}%`,
-                  left: `${-(siteMap.viewRect.x / siteMap.viewRect.w) * 100}%`,
-                  top: `${-(siteMap.viewRect.y / siteMap.viewRect.h) * 100}%`,
-                  userSelect: "none",
-                  pointerEvents: "none",
-                }}
-              />
-            </div>
+            <img
+              src={siteMap.sourceUrl}
+              alt=""
+              draggable={false}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+                objectPosition: "center",
+                transform: siteMap.rotation ? `rotate(${siteMap.rotation}deg)` : undefined,
+                transformOrigin: "center",
+                userSelect: "none",
+                pointerEvents: "none",
+              }}
+            />
           ) : (
-            <>
-              <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}>
-                <defs>
-                  <pattern id="sg" width="24" height="24" patternUnits="userSpaceOnUse">
-                    <path d="M 24 0 L 0 0 0 24" fill="none" stroke={C.cyan} strokeWidth="0.25" opacity="0.2" />
-                  </pattern>
-                  <pattern id="bg" width="120" height="120" patternUnits="userSpaceOnUse">
-                    <rect width="120" height="120" fill="url(#sg)" />
-                    <path d="M 120 0 L 0 0 0 120" fill="none" stroke={C.cyan} strokeWidth="0.6" opacity="0.12" />
-                  </pattern>
-                </defs>
-                <rect width="100%" height="100%" fill="#EEF3F8" />
-                <rect width="100%" height="100%" fill="url(#bg)" />
-                <rect x="8%" y="8%" width="84%" height="84%" fill="none" stroke={C.cyan} strokeWidth="0.7" strokeDasharray="12 6" opacity="0.45" />
-              </svg>
-              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, pointerEvents: "none" }}>
-                <span style={{ fontSize: 12, color: C.muted, fontStyle: "italic" }}>No map yet.</span>
-                <button
-                  onClick={() => setMapSetup({ img:null, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })}
-                  style={{ pointerEvents: "all", padding: "6px 16px", fontSize: 11, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 5, cursor: "pointer" }}
-                >
-                  Add a map
-                </button>
-              </div>
-            </>
+            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, pointerEvents: "none" }}>
+              <span style={{ fontSize: 12, color: C.muted, fontStyle: "italic" }}>No map yet.</span>
+              <button
+                onClick={() => setMapSetup({ img:null, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false })}
+                style={{ pointerEvents: "all", padding: "6px 16px", fontSize: 11, fontWeight: 700, background: C.cyan, color: "#fff", border: "none", borderRadius: 5, cursor: "pointer" }}
+              >
+                Add a map
+              </button>
+            </div>
           )}
 
           {/* SVG pipe overlay */}
@@ -6433,44 +6482,154 @@ export default function App() {
                   {stepHdr(5, `${sv.observations.filter(o => o.type !== "start-of-pipe" && o.type !== "end-of-pipe" && o.type !== "camera-stoppage").length} obs.${cippCount ? ` · ${cippCount} CIPP concern${cippCount !== 1 ? "s" : ""}` : ""}${hasStartOfPipe && hasEndBoundary ? "" : " · start/end required"}`)}
                   {isActive(5) && (
                     <div>
-                      {/* START OF PIPE gate */}
-                      {!hasStartOfPipe ? (
-                        <div style={{ margin: "14px 16px", padding: "14px", borderRadius: 8, border: "1.5px solid #0369A1", background: "#EFF8FF" }}>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: "#0369A1", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>START OF PIPE — required before logging observations</div>
-                          <div style={{ fontSize: 10, color: "#1E4D7B", lineHeight: 1.5, marginBottom: 12 }}>Everything on this run is measured forward from here.</div>
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-                            <div>
-                              <FieldLabel text="PIPE TYPE *" />
-                              <select value={startPipeForm.pipeType} onChange={e => setStartPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                                <option value="">Select…</option>
-                                {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                              </select>
+                      {/* Combined Start + End boundary card */}
+                      {(() => {
+                        const sopObs = sv.observations.find(o => o.type === "start-of-pipe")
+                        const savedBoundaryTop = sv.observations.find(o => o.type === "end-of-pipe" || o.type === "camera-stoppage")
+                        const eopGreyed = stopPreference === "camera-stoppage"
+                        const csGreyed = stopPreference === "end-of-pipe"
+                        const activeTab = savedBoundaryTop?.type ?? (stopPreference === "either" ? "end-of-pipe" : stopPreference)
+                        const endDisabled = !hasStartOfPipe
+                        return (
+                          <div style={{ margin: "14px 16px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.card, overflow: "hidden" }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+                              {/* LEFT — Start of pipe */}
+                              <div style={{ borderRight: `1px solid ${C.border}`, padding: "12px" }}>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: "#0369A1", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>START · 0 ft</div>
+                                {sopObs ? (
+                                  <div>
+                                    <div style={{ fontSize: 10, fontWeight: 700, color: "#00803E", marginBottom: 2 }}>✓ Saved</div>
+                                    <div style={{ fontSize: 10, color: C.text, marginBottom: 6 }}>{sopObs.pipeSize} {sopObs.pipeType}</div>
+                                    <button onClick={() => updateVideo({ observations: sv.observations.filter(o => o.type !== "start-of-pipe") })} style={{ fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer", padding: 0 }}>Edit</button>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                    <div>
+                                      <FieldLabel text="PIPE TYPE *" />
+                                      <select value={startPipeForm.pipeType} onChange={e => setStartPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                        <option value="">Select…</option>
+                                        {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                      </select>
+                                    </div>
+                                    <div>
+                                      <FieldLabel text="PIPE SIZE *" />
+                                      <select value={startPipeForm.pipeSize} onChange={e => setStartPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                        <option value="">Select…</option>
+                                        {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
+                                      </select>
+                                    </div>
+                                    <button
+                                      disabled={!startPipeForm.pipeType || !startPipeForm.pipeSize}
+                                      onClick={() => {
+                                        const newObs: Observation = { id: `sop-${Date.now()}`, type: "start-of-pipe", footage: "0", pipeType: startPipeForm.pipeType, pipeSize: startPipeForm.pipeSize }
+                                        updateVideo({ observations: [newObs, ...sv.observations.filter(o => o.type !== "start-of-pipe")] })
+                                        setStartPipeSaved(sv.id)
+                                      }}
+                                      style={{ width: "100%", padding: "8px", fontSize: 10, fontWeight: 700, borderRadius: 5, cursor: startPipeForm.pipeType && startPipeForm.pipeSize ? "pointer" : "default", background: startPipeForm.pipeType && startPipeForm.pipeSize ? "#0369A1" : C.card, color: startPipeForm.pipeType && startPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
+                                    >Save</button>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* RIGHT — End of pipe / Camera Stoppage */}
+                              <div style={{ padding: "12px", opacity: endDisabled ? 0.45 : 1, pointerEvents: endDisabled ? "none" : "auto" }}>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: stopPreference === "camera-stoppage" ? "#38424E" : "#0369A1", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>
+                                  END · {sv.stopFootage ?? "—"} ft
+                                </div>
+                                {savedBoundaryTop ? (
+                                  <div>
+                                    <div style={{ fontSize: 10, fontWeight: 700, color: "#00803E", marginBottom: 2 }}>✓ Saved</div>
+                                    <div style={{ fontSize: 10, color: C.text, marginBottom: 6 }}>
+                                      {savedBoundaryTop.type === "end-of-pipe"
+                                        ? `${savedBoundaryTop.pipeSize} ${savedBoundaryTop.pipeType}`
+                                        : "Camera stoppage"}
+                                    </div>
+                                    <button onClick={() => { updateVideo({ observations: sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage") }); setEndPipeSaved(null) }} style={{ fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer", padding: 0 }}>Edit</button>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                    {/* Tab row */}
+                                    <div style={{ display: "flex", borderRadius: 5, overflow: "hidden", border: `1px solid ${C.border}` }}>
+                                      {(["end-of-pipe", "camera-stoppage"] as const).map(tab => {
+                                        const greyed = tab === "end-of-pipe" ? eopGreyed : csGreyed
+                                        const isActive = activeTab === tab
+                                        return (
+                                          <div key={tab} onClick={() => !greyed && !isActive && undefined} style={{ flex: 1, padding: "5px 4px", fontSize: 8.5, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", textAlign: "center", background: isActive ? (tab === "camera-stoppage" ? "#38424E" : "#0369A1") : C.bg, color: isActive ? "#fff" : greyed ? C.dim : C.muted, opacity: greyed ? 0.5 : 1, borderRight: tab === "end-of-pipe" ? `1px solid ${C.border}` : undefined }}>
+                                            {tab === "end-of-pipe" ? "End of pipe" : "Stoppage"}
+                                            {greyed && <div style={{ fontSize: 7.5, fontWeight: 400, opacity: 0.8, lineHeight: 1.2, marginTop: 1 }}>{tab === "end-of-pipe" ? "stopped early" : "fully inspected"}</div>}
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+                                    {activeTab === "end-of-pipe" ? (
+                                      <>
+                                        <div>
+                                          <FieldLabel text="PIPE TYPE *" />
+                                          <select value={endPipeForm.pipeType} onChange={e => setEndPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                            <option value="">Select…</option>
+                                            {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                          </select>
+                                        </div>
+                                        <div>
+                                          <FieldLabel text="PIPE SIZE *" />
+                                          <select value={endPipeForm.pipeSize} onChange={e => setEndPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                            <option value="">Select…</option>
+                                            {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
+                                          </select>
+                                        </div>
+                                        <button
+                                          disabled={!endPipeForm.pipeType || !endPipeForm.pipeSize}
+                                          onClick={() => {
+                                            const newObs: Observation = { id: `eop-${Date.now()}`, type: "end-of-pipe", footage: sv.stopFootage ?? "9999", pipeType: endPipeForm.pipeType, pipeSize: endPipeForm.pipeSize }
+                                            updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage"), newObs] })
+                                            setEndPipeSaved(sv.id)
+                                          }}
+                                          style={{ width: "100%", padding: "8px", fontSize: 10, fontWeight: 700, borderRadius: 5, cursor: endPipeForm.pipeType && endPipeForm.pipeSize ? "pointer" : "default", background: endPipeForm.pipeType && endPipeForm.pipeSize ? "#0369A1" : C.card, color: endPipeForm.pipeType && endPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
+                                        >Save</button>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <div>
+                                          <FieldLabel text="DEPTH *" />
+                                          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                            <input type="number" value={cameraStoppageForm.depth} onChange={e => setCameraStoppageForm(f => ({ ...f, depth: e.target.value }))} style={{ ...inputSt, width: "100%" }} placeholder="ft" />
+                                          </div>
+                                        </div>
+                                        <div>
+                                          <FieldLabel text="WHAT'S ABOVE *" />
+                                          <select value={cameraStoppageForm.aboveGround} onChange={e => { const ag = e.target.value; setCameraStoppageForm(f => ({ ...f, aboveGround: ag, ownership: ownershipFor(ag) })) }} style={{ ...inputSt, paddingRight: 4 }}>
+                                            <option value="">Select…</option>
+                                            {ABOVE_GROUND_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                                          </select>
+                                        </div>
+                                        <div>
+                                          <FieldLabel text="SURFACE MARKED *" />
+                                          <select value={cameraStoppageForm.surfaceMarked} onChange={e => setCameraStoppageForm(f => ({ ...f, surfaceMarked: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
+                                            <option value="">Select…</option>
+                                            {["Painted", "Marked on the photo", "Not marked"].map(o => <option key={o} value={o}>{o}</option>)}
+                                          </select>
+                                        </div>
+                                        <button
+                                          disabled={!cameraStoppageForm.depth || !cameraStoppageForm.aboveGround || !cameraStoppageForm.surfaceMarked}
+                                          onClick={() => {
+                                            const newObs: Observation = { id: `cs-${Date.now()}`, type: "camera-stoppage", footage: sv.stopFootage ?? "9999", stopLocateDepth: cameraStoppageForm.depth, stopLocateAboveGround: cameraStoppageForm.aboveGround, stopLocateOwnership: cameraStoppageForm.ownership || ownershipFor(cameraStoppageForm.aboveGround), stopLocateSurfaceMarked: cameraStoppageForm.surfaceMarked, stopLocateEstimatorNotes: cameraStoppageForm.estimatorNotes }
+                                            updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage"), newObs] })
+                                            setEndPipeSaved(sv.id)
+                                          }}
+                                          style={{ width: "100%", padding: "8px", fontSize: 10, fontWeight: 700, borderRadius: 5, cursor: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "pointer" : "default", background: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "#38424E" : C.card, color: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "#fff" : C.dim, border: "none" }}
+                                        >Save</button>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                            <div>
-                              <FieldLabel text="PIPE SIZE *" />
-                              <select value={startPipeForm.pipeSize} onChange={e => setStartPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                                <option value="">Select…</option>
-                                {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-                              </select>
-                            </div>
+                            {endDisabled && (
+                              <div style={{ padding: "6px 12px", borderTop: `1px solid ${C.border}`, fontSize: 9, color: C.dim, fontStyle: "italic" }}>Save start of pipe to unlock the end.</div>
+                            )}
                           </div>
-                          <div style={{ marginBottom: 10 }}>
-                            <FieldLabel text="STILL AT 0 FT" />
-                            <button style={{ width: "100%", padding: "7px", fontSize: 10, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
-                          </div>
-                          <button
-                            disabled={!startPipeForm.pipeType || !startPipeForm.pipeSize}
-                            onClick={() => {
-                              const newObs: Observation = { id: `sop-${Date.now()}`, type: "start-of-pipe", footage: "0", pipeType: startPipeForm.pipeType, pipeSize: startPipeForm.pipeSize }
-                              updateVideo({ observations: [newObs, ...sv.observations.filter(o => o.type !== "start-of-pipe")] })
-                              setStartPipeSaved(sv.id)
-                            }}
-                            style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: startPipeForm.pipeType && startPipeForm.pipeSize ? "pointer" : "default", background: startPipeForm.pipeType && startPipeForm.pipeSize ? "#0369A1" : C.card, color: startPipeForm.pipeType && startPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
-                          >
-                            Save start of pipe
-                          </button>
-                        </div>
-                      ) : null}
+                        )
+                      })()}
 
                       {/* Main observation UI — shown once start-of-pipe is saved */}
                       {hasStartOfPipe && <>
@@ -6552,7 +6711,8 @@ export default function App() {
 
                 {/* Region C — chooser or form */}
                 {captureStep !== "none" && (
-                  <div style={{ margin: "0 16px 12px", borderRadius: 8, border: "1.5px solid #A96B00", background: "#FFFBF5", overflow: "hidden" }}>
+                  <div style={{ margin: "0 16px 12px", borderRadius: 8, border: `1.5px solid ${editingObsId ? "#0369A1" : "#A96B00"}`, background: editingObsId ? "#EFF8FF" : "#FFFBF5", overflow: "hidden" }}>
+                    {editingObsId && <div style={{ padding: "6px 14px", background: "#0369A1", fontSize: 9.5, fontWeight: 700, color: "#fff", letterSpacing: "0.08em", textTransform: "uppercase" }}>Editing observation</div>}
 
                     {/* Chooser */}
                     {captureStep === "chooser" && (
@@ -6596,7 +6756,7 @@ export default function App() {
                             </button>
                           ))}
                         </div>
-                        <button onClick={() => setCaptureStep("none")} style={{ marginTop: 10, width: "100%", padding: "7px", fontSize: 10.5, background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Cancel</button>
+                        <button onClick={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} style={{ marginTop: 10, width: "100%", padding: "7px", fontSize: 10.5, background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer" }}>Cancel</button>
                       </div>
                     )}
 
@@ -6618,7 +6778,7 @@ export default function App() {
                           <input value={String(captureForm.tieServes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, tieServes: e.target.value }))} placeholder="Bldg 2 stack, laundry, area drain…" style={inputSt} />
                         </div>
                         {cippSection()}
-                        <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.tieSubtype} />
+                        <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.tieSubtype} />
                       </div>
                     )}
 
@@ -6679,7 +6839,7 @@ export default function App() {
                           <textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Describe what you see…" />
                         </div>
                         {cippSection(true)}
-                        <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.defectSubtype} />
+                        <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.defectSubtype} />
                       </div>
                     )}
 
@@ -6716,7 +6876,7 @@ export default function App() {
                           <FieldLabel text="NOTES FOR ESTIMATOR" />
                           <textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Gas line 3 ft north, slab is 8 in. with rebar…" />
                         </div>
-                        <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.footage || !captureForm.footageTo || !captureForm.depthBand || !captureForm.surface || !captureForm.restoreSqft} />
+                        <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.footage || !captureForm.footageTo || !captureForm.depthBand || !captureForm.surface || !captureForm.restoreSqft} />
                       </div>
                     )}
 
@@ -6735,7 +6895,7 @@ export default function App() {
                           <textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="" />
                         </div>
                         {cippSection()}
-                        <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.directionWhich} />
+                        <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.directionWhich} />
                       </div>
                     )}
 
@@ -6750,7 +6910,7 @@ export default function App() {
                           This runs to the next change, or to the run end. A size change means separate liner setups, so it changes the price.
                         </div>
                         {cippSection()}
-                        <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.pipeType || !captureForm.pipeSize} />
+                        <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.pipeType || !captureForm.pipeSize} />
                       </div>
                     )}
                   </div>
@@ -6795,7 +6955,10 @@ export default function App() {
                                 </div>
                                 {obs.notes && <div style={{ fontSize: 10, color: C.muted, marginTop: 4, lineHeight: 1.4 }}>{obs.notes}</div>}
                               </div>
-                              <button onClick={() => deleteObservation(obs.id)} style={{ flexShrink: 0, padding: "2px 6px", fontSize: 9, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 3, cursor: "pointer", marginTop: 1 }}>✕</button>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 3, flexShrink: 0, marginTop: 1 }}>
+                                <button onClick={() => { setCaptureForm({ ...obs } as Record<string, unknown>); setCaptureStep(obs.type as ObsType); setEditingObsId(obs.id) }} style={{ padding: "2px 6px", fontSize: 9, background: "#EFF8FF", color: "#0369A1", border: "1px solid #BAE6FD", borderRadius: 3, cursor: "pointer" }}>✎</button>
+                                <button onClick={() => deleteObservation(obs.id)} style={{ padding: "2px 6px", fontSize: 9, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 3, cursor: "pointer" }}>✕</button>
+                              </div>
                             </div>
                           )
                         })
@@ -6804,146 +6967,6 @@ export default function App() {
                   )}
                 </div>}
 
-                {/* END BOUNDARY gate — End of pipe or Camera Stoppage */}
-                {hasStartOfPipe && (() => {
-                  const savedBoundary = sv.observations.find(o => o.type === "end-of-pipe" || o.type === "camera-stoppage")
-                  const activeTab = savedBoundary?.type ?? (stopPreference === "either" ? "end-of-pipe" : stopPreference)
-                  const eopGreyed = stopPreference === "camera-stoppage"
-                  const csGreyed = stopPreference === "end-of-pipe"
-                  return (
-                    <div style={{ margin: "0 16px 12px", borderRadius: 8, border: hasEndBoundary ? "1.5px solid #00803E" : "1.5px solid #0369A1", background: hasEndBoundary ? "#E8F4EF" : "#EFF8FF", overflow: "hidden" }}>
-                      {/* Tab row */}
-                      {!hasEndBoundary && (
-                        <div style={{ display: "flex", borderBottom: `1px solid #CBD5E1` }}>
-                          {(["end-of-pipe", "camera-stoppage"] as const).map(tab => {
-                            const greyed = tab === "end-of-pipe" ? eopGreyed : csGreyed
-                            const label = tab === "end-of-pipe" ? "End of pipe" : "Camera Stoppage"
-                            const isActive = activeTab === tab
-                            return (
-                              <div key={tab} style={{ flex: 1, padding: "8px 10px", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", cursor: greyed ? "default" : "pointer", color: greyed ? C.dim : isActive ? "#0369A1" : C.muted, borderBottom: isActive ? "2px solid #0369A1" : "2px solid transparent", background: isActive ? "#EFF8FF" : "transparent", opacity: greyed ? 0.5 : 1, textAlign: "center", transition: "all 0.1s" }}>
-                                {label}
-                                {greyed && <div style={{ fontSize: 8, fontWeight: 400, color: C.dim, marginTop: 2, lineHeight: 1.3 }}>{tab === "end-of-pipe" ? "Camera stopped before the end" : "Camera reached the end"}</div>}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
-                      <div style={{ padding: "12px 14px" }}>
-                        {hasEndBoundary ? (
-                          <div>
-                            <div style={{ fontSize: 10, fontWeight: 700, color: "#00803E", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>
-                              ✓ {savedBoundary!.type === "end-of-pipe" ? "END OF PIPE" : "CAMERA STOPPAGE"} — saved
-                            </div>
-                            <div style={{ fontSize: 10, color: "#1A5C3A", lineHeight: 1.45 }}>
-                              {savedBoundary!.type === "end-of-pipe"
-                                ? `${savedBoundary!.pipeType} · ${savedBoundary!.pipeSize} at ${sv.stopFootage ?? "—"} ft`
-                                : `Camera stopped at ${sv.stopFootage ?? "—"} ft — pipe continues`}
-                              <button onClick={() => { updateVideo({ observations: sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage") }); setEndPipeSaved(null) }} style={{ marginLeft: 8, fontSize: 9, color: "#DC2626", background: "none", border: "none", cursor: "pointer" }}>Edit</button>
-                            </div>
-                          </div>
-                        ) : activeTab === "end-of-pipe" ? (
-                          <>
-                            <div style={{ fontSize: 10, color: "#1E4D7B", lineHeight: 1.5, marginBottom: 10 }}>What the pipe is at {sv.stopFootage ?? "—"} ft, where the camera stopped.</div>
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-                              <div>
-                                <FieldLabel text="PIPE TYPE *" />
-                                <select value={endPipeForm.pipeType} onChange={e => setEndPipeForm(f => ({ ...f, pipeType: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                                  <option value="">Select…</option>
-                                  {PIPE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                                </select>
-                              </div>
-                              <div>
-                                <FieldLabel text="PIPE SIZE *" />
-                                <select value={endPipeForm.pipeSize} onChange={e => setEndPipeForm(f => ({ ...f, pipeSize: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                                  <option value="">Select…</option>
-                                  {PIPE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-                                </select>
-                              </div>
-                            </div>
-                            <div style={{ marginBottom: 10 }}>
-                              <FieldLabel text={`STILL AT ${sv.stopFootage ?? "—"} FT`} />
-                              <button style={{ width: "100%", padding: "7px", fontSize: 10, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
-                            </div>
-                            <button
-                              disabled={!endPipeForm.pipeType || !endPipeForm.pipeSize}
-                              onClick={() => {
-                                const newObs: Observation = { id: `eop-${Date.now()}`, type: "end-of-pipe", footage: sv.stopFootage ?? "9999", pipeType: endPipeForm.pipeType, pipeSize: endPipeForm.pipeSize }
-                                updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage"), newObs] })
-                                setEndPipeSaved(sv.id)
-                              }}
-                              style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: endPipeForm.pipeType && endPipeForm.pipeSize ? "pointer" : "default", background: endPipeForm.pipeType && endPipeForm.pipeSize ? "#0369A1" : C.card, color: endPipeForm.pipeType && endPipeForm.pipeSize ? "#fff" : C.dim, border: "none" }}
-                            >
-                              Save end of pipe
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <div style={{ fontSize: 10, color: "#38424E", lineHeight: 1.5, marginBottom: 10 }}>The pipe continues past {sv.stopFootage ?? "—"} ft. Log a locate so an excavation can find the far end.</div>
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-                              <div>
-                                <FieldLabel text="DEPTH *" />
-                                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                  <input type="number" value={cameraStoppageForm.depth} onChange={e => setCameraStoppageForm(f => ({ ...f, depth: e.target.value }))} style={{ ...inputSt, width: 64 }} placeholder="ft" />
-                                  <span style={{ fontSize: 10, color: C.muted }}>ft</span>
-                                </div>
-                              </div>
-                              <div>
-                                <FieldLabel text="SURFACE MARKED *" />
-                                <select value={cameraStoppageForm.surfaceMarked} onChange={e => setCameraStoppageForm(f => ({ ...f, surfaceMarked: e.target.value }))} style={{ ...inputSt, paddingRight: 4 }}>
-                                  <option value="">Select…</option>
-                                  {["Painted", "Marked on the photo", "Not marked"].map(o => <option key={o} value={o}>{o}</option>)}
-                                </select>
-                              </div>
-                            </div>
-                            <div style={{ marginBottom: 8 }}>
-                              <FieldLabel text="WHAT'S ABOVE *" />
-                              <select value={cameraStoppageForm.aboveGround} onChange={e => { const ag = e.target.value; setCameraStoppageForm(f => ({ ...f, aboveGround: ag, ownership: ownershipFor(ag) })) }} style={{ ...inputSt, paddingRight: 4 }}>
-                                <option value="">Select…</option>
-                                {ABOVE_GROUND_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-                              </select>
-                            </div>
-                            {cameraStoppageForm.aboveGround && (
-                              <div style={{ marginBottom: 8 }}>
-                                <FieldLabel text="OWNERSHIP" />
-                                <div style={{ fontSize: 10.5, color: C.text, padding: "6px 0" }}>{cameraStoppageForm.ownership || ownershipFor(cameraStoppageForm.aboveGround)}</div>
-                              </div>
-                            )}
-                            {MUNICIPAL_SURFACES.includes(cameraStoppageForm.aboveGround) && (
-                              <div style={{ padding: "7px 10px", borderRadius: 5, background: "#FFFBF0", border: "1px solid #F59E0B44", fontSize: 9.5, color: "#92400E", marginBottom: 8, lineHeight: 1.4 }}>
-                                ⚠ This point is under municipal property. Excavation here means a permit, traffic control, and restoration to municipal spec.
-                              </div>
-                            )}
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-                              <div>
-                                <FieldLabel text="PHOTO — CLOSE *" />
-                                <button style={{ width: "100%", padding: "7px", fontSize: 9.5, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
-                              </div>
-                              <div>
-                                <FieldLabel text="PHOTO — WIDE *" />
-                                <button style={{ width: "100%", padding: "7px", fontSize: 9.5, background: C.card, color: C.muted, border: `1.5px dashed ${C.border}`, borderRadius: 5, cursor: "pointer" }}>+ Capture</button>
-                              </div>
-                            </div>
-                            <div style={{ marginBottom: 10 }}>
-                              <FieldLabel text="NOTES FOR THE ESTIMATOR" />
-                              <textarea value={cameraStoppageForm.estimatorNotes} onChange={e => setCameraStoppageForm(f => ({ ...f, estimatorNotes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} />
-                            </div>
-                            <button
-                              disabled={!cameraStoppageForm.depth || !cameraStoppageForm.aboveGround || !cameraStoppageForm.surfaceMarked}
-                              onClick={() => {
-                                const newObs: Observation = { id: `cs-${Date.now()}`, type: "camera-stoppage", footage: sv.stopFootage ?? "9999", stopLocateDepth: cameraStoppageForm.depth, stopLocateAboveGround: cameraStoppageForm.aboveGround, stopLocateOwnership: cameraStoppageForm.ownership || ownershipFor(cameraStoppageForm.aboveGround), stopLocateSurfaceMarked: cameraStoppageForm.surfaceMarked, stopLocateEstimatorNotes: cameraStoppageForm.estimatorNotes }
-                                updateVideo({ observations: [...sv.observations.filter(o => o.type !== "end-of-pipe" && o.type !== "camera-stoppage"), newObs] })
-                                setEndPipeSaved(sv.id)
-                              }}
-                              style={{ width: "100%", padding: "9px", fontSize: 10.5, fontWeight: 700, borderRadius: 5, cursor: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "pointer" : "default", background: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "#38424E" : C.card, color: (cameraStoppageForm.depth && cameraStoppageForm.aboveGround && cameraStoppageForm.surfaceMarked) ? "#fff" : C.dim, border: "none" }}
-                            >
-                              Save camera stoppage
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })()}
                 </>}
 
                 {/* Step 5 footer */}
@@ -7167,7 +7190,10 @@ export default function App() {
                 {obs.notes && <div style={{ fontSize: 10.5, color: "#5F6E7C", marginTop: 5, lineHeight: 1.4 }}>{obs.notes}</div>}
                 {obs.tieServes && <div style={{ fontSize: 10.5, color: "#5F6E7C", marginTop: 5 }}>{obs.tieServes}</div>}
               </div>
-              <button onClick={() => deleteObservation(obs.id)} style={{ flexShrink: 0, padding: "3px 8px", fontSize: 10, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 3, cursor: "pointer", marginTop: 2 }}>✕</button>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0, marginTop: 2 }}>
+                <button onClick={() => { setCaptureForm({ ...obs } as Record<string, unknown>); setCaptureStep(obs.type as ObsType); setEditingObsId(obs.id) }} style={{ padding: "3px 8px", fontSize: 10, background: "#EFF8FF", color: "#0369A1", border: "1px solid #BAE6FD", borderRadius: 3, cursor: "pointer" }}>✎</button>
+                <button onClick={() => deleteObservation(obs.id)} style={{ padding: "3px 8px", fontSize: 10, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 3, cursor: "pointer" }}>✕</button>
+              </div>
             </div>
           )
         })
@@ -7175,6 +7201,9 @@ export default function App() {
         // Shared form content for right panel
         const formPanel = (
           <>
+            {editingObsId && captureStep !== "none" && captureStep !== "chooser" && (
+              <div style={{ padding: "6px 16px", background: "#0369A1", fontSize: 9.5, fontWeight: 700, color: "#fff", letterSpacing: "0.08em", textTransform: "uppercase" }}>Editing observation</div>
+            )}
             {captureStep === "chooser" && (
               <div style={{ padding: "14px 16px 12px" }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#16202A", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 2 }}>WHAT ARE YOU LOOKING AT?</div>
@@ -7198,7 +7227,7 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <button onClick={() => setCaptureStep("none")} style={{ marginTop: 10, width: "100%", padding: "7px", fontSize: 10.5, background: "transparent", color: "#5F6E7C", border: "1px solid #D2DAE2", borderRadius: 5, cursor: "pointer" }}>Cancel</button>
+                <button onClick={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} style={{ marginTop: 10, width: "100%", padding: "7px", fontSize: 10.5, background: "transparent", color: "#5F6E7C", border: "1px solid #D2DAE2", borderRadius: 5, cursor: "pointer" }}>Cancel</button>
               </div>
             )}
             {captureStep === "tie-in" && (
@@ -7209,7 +7238,7 @@ export default function App() {
                 <ChipField label="SIZE" options={TIE_SIZES} value={String(captureForm.tieSize ?? "")} onChange={v => setCaptureForm(f => ({ ...f, tieSize: v }))} color="#1B6FB8" />
                 <div><FieldLabel text={String(captureForm.tieSubtype ?? "").startsWith("Double") ? "ORIENTATION — PICK TWO" : "ORIENTATION"} /><div style={{ display: "flex", justifyContent: "center" }}><ClockFace selected={(captureForm.tieOrientation as number[]) ?? []} multi={String(captureForm.tieSubtype ?? "").startsWith("Double")} onChange={v => setCaptureForm(f => ({ ...f, tieOrientation: v }))} /></div></div>
                 <div><FieldLabel text="WHAT IT SERVES" /><input value={String(captureForm.tieServes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, tieServes: e.target.value }))} placeholder="Bldg 2 stack, laundry, area drain…" style={inputSt} /></div>
-                <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.tieSubtype} />
+                <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.tieSubtype} />
               </div>
             )}
             {captureStep === "defect" && (
@@ -7225,7 +7254,7 @@ export default function App() {
                     </>
                 }
                 <div><FieldLabel text="NOTES" /><textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Describe what you see…" /></div>
-                <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.defectSubtype} />
+                <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.defectSubtype} />
               </div>
             )}
             {captureStep === "excavation" && (
@@ -7247,7 +7276,7 @@ export default function App() {
                 </div>
                 <ChipField label="EQUIPMENT ACCESS" options={EQUIPMENT_ACCESS} value={String(captureForm.equipmentAccess ?? "")} onChange={v => setCaptureForm(f => ({ ...f, equipmentAccess: v }))} color="#38424E" />
                 <div><FieldLabel text="NOTES FOR ESTIMATOR" /><textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} placeholder="Gas line 3 ft north…" /></div>
-                <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.footage || !captureForm.footageTo || !captureForm.depthBand || !captureForm.surface || !captureForm.restoreSqft} />
+                <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.footage || !captureForm.footageTo || !captureForm.depthBand || !captureForm.surface || !captureForm.restoreSqft} />
               </div>
             )}
             {captureStep === "direction-change" && (
@@ -7258,7 +7287,7 @@ export default function App() {
                 <ChipField label="FITTING" options={DIRECTION_FITTINGS} value={String(captureForm.directionFitting ?? "")} onChange={v => setCaptureForm(f => ({ ...f, directionFitting: v }))} color="#7333D6" />
                 <div style={{ padding: "8px 10px", borderRadius: 5, background: "#F0F4F8", fontSize: 10, color: "#5F6E7C", lineHeight: 1.5 }}>A hard 90 is what a liner and a jetter both struggle to get around.</div>
                 <div><FieldLabel text="NOTES" /><textarea value={String(captureForm.notes ?? "")} onChange={e => setCaptureForm(f => ({ ...f, notes: e.target.value }))} rows={2} style={{ ...inputSt, resize: "vertical", fontFamily: "'DM Sans', sans-serif" }} /></div>
-                <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.directionWhich} />
+                <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.directionWhich} />
               </div>
             )}
             {captureStep === "pipe-transition" && (
@@ -7268,7 +7297,7 @@ export default function App() {
                 <ChipField label="TYPE OF PIPE *" options={PIPE_TYPES} value={String(captureForm.pipeType ?? "")} onChange={v => setCaptureForm(f => ({ ...f, pipeType: v }))} color="#00803E" pricing />
                 <ChipField label="SIZE OF PIPE *" options={PIPE_SIZES} value={String(captureForm.pipeSize ?? "")} onChange={v => setCaptureForm(f => ({ ...f, pipeSize: v }))} color="#00803E" pricing />
                 <div style={{ padding: "8px 10px", borderRadius: 5, background: "#F0F4F8", fontSize: 10, color: "#5F6E7C", lineHeight: 1.5 }}>This runs to the next change, or to the run end. A size change means separate liner setups.</div>
-                <FormActions onSave={saveObservation} onCancel={() => setCaptureStep("none")} disabled={!captureForm.pipeType || !captureForm.pipeSize} />
+                <FormActions onSave={saveObservation} onCancel={() => { setCaptureStep("none"); setCaptureForm({}); setEditingObsId(null) }} disabled={!captureForm.pipeType || !captureForm.pipeSize} />
               </div>
             )}
           </>
@@ -7908,7 +7937,10 @@ export default function App() {
 
         const msUpload = (f: File) => {
           const fr = new FileReader()
-          fr.onload = () => setMapSetup(s => s ? { ...s, img: fr.result as string } : null)
+          fr.onload = () => setMapSetup(s => s
+            ? { ...s, img: fr.result as string }
+            : { img: fr.result as string, rot:0, zoom:1, len:{a:null,b:null,ft:"",inches:"",confirmed:false}, wid:{a:null,b:null,ft:"",inches:"",confirmed:false}, msMode:null, msDrag:null, cursor:null, view:null, viewName:"Full property", done:false, changeViewOnly:false }
+          )
           fr.readAsDataURL(f)
         }
 
@@ -8078,6 +8110,20 @@ export default function App() {
 
               {/* Image area */}
               <div style={{ flex:1, padding:20, display:"flex", alignItems:"center", justifyContent:"center", overflow:"auto", background:"#0B0F13" }}>
+                {!ms.img && (
+                  <div
+                    onClick={() => mapFileRef.current?.click()}
+                    onDragOver={e => e.preventDefault()}
+                    onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) msUpload(f) }}
+                    style={{ border:`2px dashed ${C.border}`, borderRadius:10, padding:60, textAlign:"center", cursor:"pointer", maxWidth:460 }}>
+                    <input ref={mapFileRef} type="file" accept="image/*" style={{ display:"none" }} onChange={e => { const f = e.target.files?.[0]; if (f) msUpload(f); e.target.value = "" }} />
+                    <div style={{ fontSize:15, fontWeight:700, marginBottom:8, color:"#E8EDF2" }}>Drop a map image here</div>
+                    <div style={{ fontSize:12, color:"#8B97A5", lineHeight:1.6 }}>
+                      Click to browse, drag a file in, or paste from the clipboard.<br /><br />
+                      Screenshot the property from your county GIS viewer. Frame the whole property with a little margin.
+                    </div>
+                  </div>
+                )}
                 {ms.img && (
                   <div style={{ position:"relative", transform:`scale(${ms.zoom})`, transformOrigin:"center", transition:ms.msDrag ? "none" : "transform 0.15s" }}>
                     <div ref={mapWrapRef} onClick={msImgClick}
@@ -8143,20 +8189,23 @@ export default function App() {
                 <div style={{ padding:"12px 14px", borderBottom:`1px solid ${C.border}` }}>
                   <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:C.dim, marginBottom:7 }}>Image</div>
                   {!ms.img ? (
-                    <div style={{ fontSize:11, color:C.dim }}>Upload one to begin.</div>
+                    <div style={{ fontSize:11, color:C.dim }}>Upload a map image to enable these controls.</div>
                   ) : (
                     <>
                       <div style={{ display:"flex", gap:6, marginBottom:9 }}>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 270) % 360 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>↺ 90°</button>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 90) % 360 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>↻ 90°</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 270) % 360 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"#1E2832", color:"#E8EDF2", border:"1px solid #3A4A5A", borderRadius:6, cursor:"pointer" }}>↺ 90°</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, rot:(s.rot + 90) % 360 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"#1E2832", color:"#E8EDF2", border:"1px solid #3A4A5A", borderRadius:6, cursor:"pointer" }}>↻ 90°</button>
                       </div>
-                      <div style={{ fontSize:9, color:C.dim, marginBottom:4 }}>SIZE · {Math.round(ms.zoom * 100)}%</div>
+                      <div style={{ fontSize:9, color:"#94A3B8", marginBottom:4 }}>SIZE · {Math.round(ms.zoom * 100)}%</div>
                       <input type="range" min="0.5" max="2" step="0.05" value={ms.zoom} onChange={e => setMapSetup(s => s ? { ...s, zoom: parseFloat(e.target.value) } : null)} style={{ width:"100%", marginBottom:8 }} />
                       <div style={{ display:"flex", gap:6 }}>
-                        <button onClick={() => setMapSetup(s => s ? { ...s, zoom: 1 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"transparent", color:"#E8EDF2", border:`1px solid ${C.border}`, borderRadius:6, cursor:"pointer" }}>Fit</button>
+                        <button onClick={() => setMapSetup(s => s ? { ...s, zoom: 1 } : null)} style={{ flex:1, padding:"8px 12px", fontSize:12, fontWeight:700, background:"#1E2832", color:"#E8EDF2", border:"1px solid #3A4A5A", borderRadius:6, cursor:"pointer" }}>Fit</button>
                       </div>
-                      <div style={{ fontSize:10, color:C.dim, marginTop:8, lineHeight:1.5 }}>
-                        Rotating and resizing never move the measurement dots relative to the image.
+                      {ms.rot !== 0 && (
+                        <div style={{ marginTop:8, fontSize:9.5, color:"#22D3EE", fontFamily:"JetBrains Mono" }}>Rotated {ms.rot}° — saved with map</div>
+                      )}
+                      <div style={{ fontSize:10, color:C.dim, marginTop:6, lineHeight:1.5 }}>
+                        Rotating never moves the measurement dots relative to the image.
                       </div>
                     </>
                   )}
@@ -8211,7 +8260,7 @@ export default function App() {
                       onClick={() => {
                         if (!ms.view) return
                         if (ms.changeViewOnly) {
-                          setSiteMap(prev => prev ? { ...prev, viewName: ms.viewName, viewRect: { x: ms.view!.x/100, y: ms.view!.y/100, w: ms.view!.w/100, h: ms.view!.h/100 } } : null)
+                          setSiteMap(prev => prev ? { ...prev, viewName: ms.viewName, viewRect: { x: ms.view!.x/100, y: ms.view!.y/100, w: ms.view!.w/100, h: ms.view!.h/100 }, rotation: ms.rot } : null)
                           setMapSetup(null)
                         } else {
                           if (!ms.img || !ms.len.a || !ms.len.b || !ms.wid.a || !ms.wid.b || !msScale) return
@@ -8225,6 +8274,7 @@ export default function App() {
                             scale: msScale,
                             viewName: ms.viewName,
                             viewRect: { x: ms.view.x/100, y: ms.view.y/100, w: ms.view.w/100, h: ms.view.h/100 },
+                            rotation: ms.rot,
                             uploadedAt: new Date().toLocaleDateString("en-US", { day:"numeric", month:"short", year:"numeric" }),
                           })
                           setMapSetup(null)
